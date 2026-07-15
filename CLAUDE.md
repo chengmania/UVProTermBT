@@ -99,7 +99,10 @@ fields, headers, and docs.
 ## Build & Test
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# --system-site-packages is REQUIRED: the BT transport uses the system
+# BlueZ D-Bus bindings (python3-dbus, python3-gi). See docs/PROTOCOL.md §3.
+sudo apt install python3-dbus python3-gi        # once, system-wide
+python3 -m venv --system-site-packages .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m pytest tests/            # unit tests
 .venv/bin/python -m uvprotermbt               # run the app
 ```

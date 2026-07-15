@@ -1,2 +1,10 @@
+# Pure-pip dependencies:
 urwid
 pytest
+
+# NOTE: the Bluetooth transport (uvprotermbt/link.py) also needs the BlueZ
+# D-Bus bindings, which are SYSTEM packages, not pip installs:
+#     sudo apt install python3-dbus python3-gi
+# Create the venv so it can see them:
+#     python3 -m venv --system-site-packages .venv
+# See docs/PROTOCOL.md §3 for the full connection method and why.

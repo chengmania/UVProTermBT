@@ -129,12 +129,11 @@ investigation and the whole reason this project exists on this platform:
     or help classic RFCOMM — confirmed independent by testing both at once.
   - We do not have logs from the radio's own firmware, so root-causing
     this further from software has hit its limit for now.
-- TODO Phase 2 (still open): get a live end-to-end decode of a real AX.25
-  frame through `RfcommKissLink` on channel 1 (transport connects, but we
-  haven't yet caught it during live RF traffic), and characterize the
-  connection flakiness further if it keeps blocking progress — possibly
-  worth a dedicated session with more patience/time than fits in a single
-  sitting, given how unpredictable the timing has been.
+- **DONE Phase 2 (2026-07-14): live end-to-end AX.25 decode achieved** —
+  but NOT via a raw socket on channel 1. Getting there required abandoning
+  the raw-socket approach entirely in favour of BlueZ's SerialPort profile.
+  Full reproducible recipe in **§3 below**; this is the headline result of
+  the whole Phase 2 investigation, read that first.
 - **RESOLVED (2026-07-13, later session): root cause of the connection
   flakiness above.** `journalctl -u bluetooth` showed repeated
   `bluetoothd[...]: src/profile.c:ext_connect() Hands-Free unit failed
@@ -182,19 +181,116 @@ investigation and the whole reason this project exists on this platform:
   this radio** (RX-only; cause unknown), recommending TFKISS for TX
   verification — relevant for later on-air TX testing (Phase 4+), not
   for this project's current RX-only hardware smoke test.
-- **Architecture decision, raw socket vs `rfcomm bind`:** keeping
-  `RfcommKissLink`'s raw `socket.AF_BLUETOOTH` approach; the flakiness
-  was a BlueZ-stack-level contention issue affecting any client API
-  (both external guides needed the headset-disable fix too, regardless
-  of using `rfcomm bind`), not a deficiency of raw sockets specifically.
-  Switching would add a `sudo`-gated system device node, a `pyserial`
-  dependency, and a duplicate bind/release lifecycle for no proven
-  benefit. Revisit `rfcomm bind` + `pyserial` only if raw sockets remain
-  unreliable after the `hfp-hf` fix across multiple clean re-test
-  attempts (and not explained by an asymmetric bond, a separate known
-  issue above).
+- **Architecture decision, raw socket vs `rfcomm bind`** — ⚠️ **SUPERSEDED
+  2026-07-14, see §3.** This section previously argued for keeping
+  `RfcommKissLink`'s raw `socket.AF_BLUETOOTH` approach. Live testing then
+  showed the raw socket (AND `rfcomm bind`, which opens the same raw path
+  underneath) does **not** work with this radio at all: bare channel
+  connects are refused when the radio is awake and time out otherwise, on
+  every channel (1–15). Neither raw sockets nor `rfcomm bind`/`pyserial`
+  is the answer — the radio only serves KISS through its **SerialPort
+  profile**, reached via a BlueZ `org.bluez.Profile1` registration. That
+  is now the implemented transport. `RfcommKissLink` was rewritten onto it
+  (`uvprotermbt/link.py`); the old channel-1 raw-socket guidance below in
+  this section is retained only as investigation history.
 
-## 3. AX.25 Essentials
+## 3. Reproducing the Live KISS Link — the working method
+
+**RESOLVED 2026-07-14: first live end-to-end AX.25 decode through this
+project.** Caught real Mic-E position beacons — `KC3SMW-7 > <Mic-E dest>
+via WIDE1-1,WIDE2-1`, raw KISS (`c0 00 ... c0`, no GaiaFrame envelope).
+`uvprotermbt/link.py` implements the method below; `scripts/monitor.py` is
+the smoke test that reproduces it.
+
+### The key finding: use the SerialPort *profile*, not a raw socket
+A raw `socket.AF_BLUETOOTH`/`BTPROTO_RFCOMM` connect to a fixed channel
+does NOT work with this radio (supersedes the channel-1 raw-socket guidance
+in §2). On a clean bond with KISS TNC enabled:
+- when the radio's BR/EDR radio is awake, bare channel connects are
+  actively **refused** (ConnectionRefused) on every channel tried (1–15);
+- the radio power-saves its BR/EDR radio between pages, so on-demand raw
+  connects otherwise **time out**, flapping unpredictably.
+
+The radio only serves the KISS session through its advertised **SerialPort
+profile** (UUID `0x1101`), reached via an SDP-negotiated *profile*
+connection — exactly what macOS (YAAC) and Android (WoAD) do. Our earlier
+"channel 1" was just the channel *Android's* profile negotiation landed on,
+not something a bare socket can reproduce.
+
+On Linux the equivalent is: register a BlueZ `org.bluez.Profile1` (client
+role, SerialPort UUID), call `Device1.Connect()`, and read the RFCOMM file
+descriptor BlueZ passes to the profile's `NewConnection` callback. Pure
+Python over D-Bus — no `sudo`, no deprecated `rfcomm` tool, no `pyserial`.
+
+### Prerequisites (all required)
+1. **On the radio:** Settings (green button) → General Settings → KISS TNC
+   → **Enable KISS TNC**. Until this is on the profile connect is refused
+   and no channel listens. This KISS TNC menu is a firmware feature *not*
+   present in the Rev3 PDF manual in `docs/` — current firmware has it.
+   (Confirmed by a YAAC/VR-N76 groups.io guide; the N76 and UV-Pro are the
+   same radio/firmware.)
+2. **A clean symmetric bond.** The single biggest pairing blocker was a
+   **stale link key**: `bluetoothctl remove` silently no-ops when the
+   device object isn't currently present, leaving an old key in
+   `/var/lib/bluetooth/<adapter>/<radio>/`. Against a radio that has
+   forgotten us, that mismatch gives `AuthenticationRejected` on pair and
+   `br-connection-refused` on connect. Fix — wipe BOTH sides:
+   ```
+   # on the radio: forget all Bluetooth connections, then enter Pairing
+   sudo rm -rf /var/lib/bluetooth/<ADAPTER-MAC>/38:D2:00:01:38:8F
+   sudo systemctl restart bluetooth
+   bluetoothctl          # scan on; pair <MAC>; trust <MAC>; quit
+   ```
+   KDE's bluedevil supplies the pairing agent — do **not** register your
+   own; `agent`/`default-agent` in a throwaway `bluetoothctl` session fails
+   with "Failed to register agent object" because one already exists.
+3. **BlueZ D-Bus bindings:** `python3-dbus` + `python3-gi` (PyGObject).
+   They come from the system, so build the venv with
+   `--system-site-packages`:
+   ```
+   python3 -m venv --system-site-packages .venv
+   .venv/bin/pip install -r requirements.txt
+   ```
+
+### Run it
+```
+.venv/bin/python scripts/monitor.py          # defaults to the UV-Pro MAC
+```
+Then generate APRS traffic (another station beaconing, or beacon from the
+UV-Pro once it has a GPS lock). Expect:
+```
+KISS frame  port=0 cmd=0 len=47  KC3SMW-7 > TPQS3U-0 via WIDE1-1,WIDE2-1
+```
+
+### Connection gotchas
+- `Device1.Connect()` frequently returns `NoReply`/`br-connection-busy`
+  while BlueZ finishes in the background — the `NewConnection` callback is
+  the real success signal, so those are non-fatal (link.py treats them as
+  transient and keeps a backoff retry running).
+- `br-connection-busy` also appears when something else is mid-connect:
+  KDE auto-connect, a stale `rfcomm bind`, or a prior `ConnectProfile`
+  still in flight. link.py issues a `Disconnect()` before each `Connect()`
+  to clear it.
+- `bluetoothctl connect` may report `br-connection-refused` even when the
+  profile path works — it tries the SDP-advertised profiles (incl. the
+  Handsfree Audio Gateway, which the radio refuses / shows as a "headset").
+  Expected and harmless; the SerialPort profile still connects.
+- `sdptool browse`/`records` frequently time out against this radio even
+  with the ACL up. Ignore it — BlueZ's own SDP during `Connect()` is what
+  matters, and it caches the service list (visible in `bluetoothctl info`).
+- The `hfp-hf` systemd `--noplugin` fix from §2 remains in place and does
+  no harm, but the profile method is what actually delivered KISS; the
+  headset contention is sidestepped by connecting the SerialPort profile.
+
+### Payloads are Mic-E
+The live beacons are **Mic-E** encoded (the VR-N76 APRS setup guide
+recommends Mic-E for packet efficiency): the AX.25 *destination* address
+carries the encoded latitude (looks like gibberish, e.g. `TPQS3U`), and the
+info field starts with `` ` `` (0x60) or `'` (0x1C). `aprs.py` must decode
+Mic-E, not just the standard `!`/`=` position and `:` message formats.
+This is Phase 3 work — flagged here so it isn't a surprise.
+
+## 4. AX.25 Essentials
 
 - Address field: callsign shifted left 1 bit, space-padded to 6 chars;
   SSID byte carries SSID (bits 1-4), H bit (has-been-digipeated), and the
@@ -207,7 +303,7 @@ investigation and the whole reason this project exists on this platform:
   - T1 retry timer: start ~5 s at 1200 baud w/ digi hops, back off
 - FCS: handled by the TNC in KISS mode — do NOT append CRC in KISS payloads.
 
-## 4. APRS Messaging (spec ch. 14)
+## 5. APRS Messaging (spec ch. 14)
 
 - Format: `:AAAAAAAAA:message text{NNNNN`
   - Addressee exactly 9 chars, space-padded
@@ -220,7 +316,7 @@ investigation and the whole reason this project exists on this platform:
 - Default path `WIDE1-1,WIDE2-1`; make configurable (some areas prefer
   WIDE2-1 only).
 
-## 5. Callsign Conventions
+## 6. Callsign Conventions
 
 - Default station: KC3SMW, suggested SSID -7 (HT/handheld convention).
   On-air smoke testing during the AXTermPuter investigation used -10 and
@@ -230,7 +326,7 @@ investigation and the whole reason this project exists on this platform:
 - Terminal mode primary target: ChengmaniaBPQ node (confirm on-air
   call/SSID of the node port before real BBS testing)
 
-## 6. Legal Reminders
+## 7. Legal Reminders
 
 - Part 97: no content encryption on RF; ID with callsign (inherent in
   AX.25 source address); no third-party auto-forwarding shenanigans in v1.

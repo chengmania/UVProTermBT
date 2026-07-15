@@ -155,3 +155,107 @@ UVProTermBT — Session Log
   stays up (not flapping), and catch a real live KISS/AX.25 decode
   during actual RF traffic to finally close out the Phase 2 hardware
   test.
+
+2026-07-14 — Phase 2 CLOSED: first live KISS/AX.25 decode; transport rewritten
+- **Milestone: decoded live APRS traffic end-to-end for the first time.**
+  Caught real Mic-E position beacons from the UV-Pro over Bluetooth:
+  `KC3SMW-7 > <Mic-E dest> via WIDE1-1,WIDE2-1`, control 0x03 / PID 0xF0,
+  raw KISS framing (`c0 00 ... c0`, no GaiaFrame envelope).
+- **The raw-socket approach was a dead end — rewrote the transport.** The
+  prior `RfcommKissLink` (raw `socket.AF_BLUETOOTH` to channel 1) never
+  works with this radio: when the radio's BR/EDR is awake it *refuses*
+  bare channel connects on every channel (swept 1–15), and it power-saves
+  between pages so connects otherwise time out. Proved this session that
+  the earlier "cat /dev/rfcomm0 held 60s = healthy link" reading was
+  wrong — the open was just blocking on a connect that never completed
+  (a direct socket connect test made it explicit: TimeoutError). Credit
+  to Greg for pushing back with "I don't think you ever connected" — that
+  was correct and redirected the whole session.
+- **Root method (the fix): BlueZ SerialPort profile, not a raw socket.**
+  The radio only serves KISS through its advertised SerialPort profile
+  (UUID 0x1101) via an SDP-negotiated *profile* connection — same as YAAC
+  on macOS and WoAD on Android. A groups.io YAAC/VR-N76 guide from Greg
+  named the missing radio-side step (Enable KISS TNC) and confirmed the
+  OS-mounts-a-serial-port model. Implemented on Linux by registering an
+  `org.bluez.Profile1` (client role) over D-Bus and reading the RFCOMM fd
+  BlueZ hands to `NewConnection`. Pure Python, no sudo, no `rfcomm` tool,
+  no pyserial.
+- **Two required prerequisites nailed down this session:**
+  1. **Enable KISS TNC on the radio** (Settings → General Settings →
+     KISS TNC → Enable KISS TNC). Not in the Rev3 PDF manual; it's a
+     current-firmware feature. Until on, the profile connect is refused.
+  2. **Clean symmetric bond.** The persistent pairing failure
+     (`AuthenticationRejected` / `br-connection-refused`) was a stale link
+     key in `/var/lib/bluetooth` that `bluetoothctl remove` silently
+     skips when the device object isn't present. Fix: `sudo rm -rf` the
+     device's bond dir + `systemctl restart bluetooth`, forget on the
+     radio too, then pair+trust. Let KDE's bluedevil be the pairing agent
+     (registering our own fails — one already exists).
+- **Rewrote `uvprotermbt/link.py`** onto the profile method, keeping the
+  exact public API (begin/stop/is_connected/send/on_receive/poll). Runs a
+  GLib main loop on its own thread; `Disconnect()`-before-`Connect()` to
+  clear `br-connection-busy`; treats `NoReply`/busy as transient (the
+  `NewConnection` callback is the real success signal); backoff reconnect;
+  reads the fd via a GLib IO watch into the existing rx queue. Guarded
+  dbus/gi import so the package still imports (and codec tests still run)
+  on hosts without the BlueZ bindings.
+- **Rewrote `scripts/monitor.py`** as the reproducible smoke test (defaults
+  to the UV-Pro MAC, prints decoded frames with a source>dest-via-path
+  AX.25 summary). VERIFIED live: it connects via the profile and streams
+  decoded beacons.
+- **Build change:** the venv now needs `--system-site-packages` for the
+  system `python3-dbus`/`python3-gi`. Recreated the venv that way;
+  documented in requirements.txt, CLAUDE.md, and docs/PROTOCOL.md §3.
+  `pytest tests/` still 8/8 green.
+- **Docs:** docs/PROTOCOL.md gets a new §3 "Reproducing the Live KISS
+  Link — the working method" (full recipe + gotchas), the old §2
+  raw-socket/channel-1 guidance marked SUPERSEDED, sections renumbered
+  (AX.25 §4, APRS §5, Callsign §6, Legal §7). ROADMAP Phase 2 closed.
+- **Known follow-ups (Phase 3):** payloads are **Mic-E** encoded, so
+  `aprs.py` must decode Mic-E (destination-address lat + `` ` ``/`'` info
+  type), not just standard `!`/`=`/`:`. Also: the transport shows one
+  brief disconnect/reconnect right after first connect (the
+  Disconnect-first clears state, then it stabilizes) — acceptable, but
+  worth smoothing later so the initial connect doesn't flap once.
+- **TX WORKS TOO (same session): transmitted an APRS message off-air.**
+  Built an AX.25 UI frame by hand (KC3SMW-7 > APZUVT, direct/no path,
+  info `:KC3SMW-9 :hello from UVProTermBT{1`), KISS-framed it, sent it via
+  `link.send()`. direwolf (monitoring off-air) decoded it cleanly:
+  `KC3SMW-7>APZUVT::KC3SMW-9 :hello from UVProTermBT{1` — parsed as an
+  APRS Message, number "1". So the link is fully bidirectional: RX (live
+  Mic-E beacons + a message ack) and TX both confirmed on real RF. Note
+  the direwolf-TX-fails caveat in PROTOCOL.md §2 does NOT apply — that's
+  direwolf transmitting; here direwolf only receives, and WE transmit via
+  the UV-Pro, which works.
+- **Folded the validated encoder into `uvprotermbt/ax25.py`** (first real
+  Phase 3 module): `encode_ui_frame()` (control 0x03 / PID 0xF0) plus
+  `decode_frame()` for the address field (source > dest via path) and info.
+  `Address` dataclass with proper SSID-byte handling — including the
+  subtlety that bit 7 is the command/response (C) bit on dest/source but
+  the has-been-repeated (H) bit on digipeaters (caught by a failing test
+  where an encoded dest round-tripped as "repeated").
+- **Tests: `tests/test_ax25.py` (7 tests, all green; 15 total with KISS).**
+  Anchored with two real byte vectors: the exact frame direwolf accepted
+  on-air (regression guard on the encoder) and a real received Mic-E
+  beacon (decode guard). `scripts/monitor.py` now uses `ax25.decode_frame`
+  for its summary instead of duplicating the logic.
+- **Community guide + standalone demo written and validated.** Added
+  `docs/UVPRO_N76_KISS_LINUX.md` (shareable, app-agnostic writeup of the
+  whole method: why raw sockets fail, the SerialPort-profile approach,
+  pairing/stale-key fix, troubleshooting table, credits) and
+  `scripts/uvpro_kiss_demo.py` (self-contained, dependency-free-beyond-
+  system-BlueZ-bindings RX/TX reference). Both RX and TX of the demo
+  script VERIFIED live with direwolf awake: RX decoded live Mic-E beacons;
+  TX sent `KC3SMW-7>APZUVT:>...` decoded off-air as a Status Report.
+  Debugging the demo surfaced two things every user will hit, now handled
+  in the script + documented: `AutoConnect: True` is mandatory on the
+  profile registration (else NewConnection never fires when the desktop
+  has already auto-connected the device), and the first write after
+  connect can fail with Errno 103 due to the initial disconnect flap —
+  retry on reconnect. (Also a testing note: direwolf's receiver can go to
+  sleep and silently drop packets — verify it's still decoding the
+  reference beacons before concluding a TX didn't go out.)
+- NEXT: Phase 3/4 — APRS layer (`aprs.py`): Mic-E decode (the beacons are
+  Mic-E), standard `!`/`=` position + `:` message parse, and the message
+  ack/retry queue. The ax25 encode/decode is now a solid base; validate
+  aprs.py against real off-air frames via the live link.

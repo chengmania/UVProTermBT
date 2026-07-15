@@ -17,34 +17,44 @@
       (`sdptool records <addr>` — `browse` comes back empty). Found
       channels 2/3/4 via SDP, but see below: none of those are actually
       the right one.
-- [x] `RfcommKissLink`: connect via `socket.AF_BLUETOOTH`/`BTPROTO_RFCOMM`,
-      background RX thread feeding a queue, `send()`/`onReceive()` like
-      AXTermPuter's `RadioLink` interface
+- [x] `RfcommKissLink`: **rewritten (2026-07-14) onto BlueZ's SerialPort
+      `org.bluez.Profile1`** (SDP-negotiated), NOT a raw socket — the raw
+      `socket.AF_BLUETOOTH`/`BTPROTO_RFCOMM` approach does not work with
+      this radio (see below). GLib main-loop thread feeding a queue,
+      `send()`/`on_receive()` like AXTermPuter's `RadioLink` interface.
 - [x] Reconnect logic (backoff) in `RfcommKissLink`
-- [x] Identified the real channel: **RFCOMM channel 1** (not SDP-
-      discoverable, not the channel-4 "SPP Dev" service we initially
-      targeted) via the `khusmann/benlink` reference project + our own
-      byte-level analysis of captured traffic. See docs/PROTOCOL.md §2.
-- [x] Connected live to channel 1 from Linux (confirmed twice)
+- [x] Discovered the raw-socket / "channel 1" approach is a dead end:
+      the radio refuses bare channel connects and only serves KISS via its
+      SerialPort profile (UUID 0x1101). "Channel 1" was an artifact of
+      Android's profile negotiation. See docs/PROTOCOL.md §3.
 - [x] Root-caused classic-BT connection flakiness to BlueZ's `hfp-hf`
-      Hands-Free-unit auto-connect contending with RFCOMM (confirmed via
-      `journalctl -u bluetooth`, cross-referenced against two independent
-      real-world writeups for this radio family); fixed via systemd
-      drop-in `--noplugin=hfp-hf`. See docs/PROTOCOL.md §2.
+      Hands-Free-unit auto-connect contending with RFCOMM; systemd
+      `--noplugin=hfp-hf` drop-in kept in place, though the profile method
+      sidesteps the headset contention. See docs/PROTOCOL.md §2.
+- [x] Found the real pairing blocker: a **stale link key** in
+      `/var/lib/bluetooth` that `bluetoothctl remove` silently skips.
+      Symmetric wipe + re-pair is the fix. See docs/PROTOCOL.md §3.
+- [x] **HARDWARE TEST PASSED (2026-07-14): decoded live KISS/AX.25
+      end-to-end** through the rewritten `RfcommKissLink` — real Mic-E
+      beacons `KC3SMW-7 > <Mic-E> via WIDE1-1,WIDE2-1`. Reproducible via
+      `scripts/monitor.py`; requires KISS TNC enabled on the radio.
 - [ ] BT status surfaced in the UI (no UI yet — Phase 6/7)
-- [ ] HARDWARE TEST: decode a real live KISS/AX.25 frame end-to-end
-      through `RfcommKissLink` — transport connects, but we haven't yet
-      caught it during live RF traffic. Root cause of prior flakiness
-      found and fixed (see above); re-test pending.
 
 ## Phase 3 — AX.25 UI Frames + APRS RX
-- [ ] AX.25 address encode/decode (callsign-SSID, digi path, H-bits)
-- [ ] UI frame build/parse
-- [ ] APRS packet classifier: position, status, message
+- [x] AX.25 address encode/decode (callsign-SSID, digi path, H-bits) —
+      `uvprotermbt/ax25.py`, `tests/test_ax25.py`. Correctly distinguishes
+      the C bit (dest/source) from the H/has-been-repeated bit (digis).
+- [x] UI frame build/parse — `encode_ui_frame()` / `decode_frame()`.
+      **Encoder validated on-air 2026-07-14**: a built frame was
+      transmitted through the UV-Pro and decoded by direwolf off-air.
+- [ ] APRS packet classifier: position, status, message (needs Mic-E —
+      the live beacons are Mic-E encoded)
 - [ ] Heard-stations list view (call, last heard, type)
 
 ## Phase 4 — APRS Messaging
-- [ ] Message encode (`:ADDRESSEE:text{NN`), 67-char enforcement
+- [x] Message encode (`:ADDRESSEE:text{NN`) proven end-to-end on-air ahead
+      of schedule (KC3SMW-7 message decoded by direwolf as an APRS Message,
+      number "1"). Still to formalize in `aprs.py` with 67-char enforcement.
 - [ ] Ack send on RX; retry queue with backoff on TX
 - [ ] Conversation UI: per-station threads, unread indicator, compose
 - [ ] Optional periodic status/position beacon (off by default)
