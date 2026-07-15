@@ -1,5 +1,5 @@
 # Pure-pip dependencies:
-urwid
+PyQt6
 pytest
 
 # NOTE: the Bluetooth transport (uvprotermbt/link.py) also needs the BlueZ

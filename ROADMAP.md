@@ -38,7 +38,8 @@
       end-to-end** through the rewritten `RfcommKissLink` — real Mic-E
       beacons `KC3SMW-7 > <Mic-E> via WIDE1-1,WIDE2-1`. Reproducible via
       `scripts/monitor.py`; requires KISS TNC enabled on the radio.
-- [ ] BT status surfaced in the UI (no UI yet — Phase 6/7)
+- [x] BT status surfaced in the UI — GUI status bar shows ●/○ BT (green
+      when the SerialPort profile is connected).
 
 ## Phase 3 — AX.25 UI Frames + APRS RX
 - [x] AX.25 address encode/decode (callsign-SSID, digi path, H-bits) —
@@ -47,16 +48,20 @@
 - [x] UI frame build/parse — `encode_ui_frame()` / `decode_frame()`.
       **Encoder validated on-air 2026-07-14**: a built frame was
       transmitted through the UV-Pro and decoded by direwolf off-air.
-- [ ] APRS packet classifier: position, status, message (needs Mic-E —
-      the live beacons are Mic-E encoded)
-- [ ] Heard-stations list view (call, last heard, type)
+- [x] APRS packet classifier: message/ack/reject/position/status/Mic-E —
+      `aprs.py` `parse_frame()`, `tests/test_aprs.py`. (Mic-E is classified
+      and its comment surfaced; full lat/lon Mic-E decode still TODO.)
+- [x] Heard-stations table (`aprs.HeardTable`) — data layer done; a
+      dedicated GUI list view is still TODO.
 
 ## Phase 4 — APRS Messaging
-- [x] Message encode (`:ADDRESSEE:text{NN`) proven end-to-end on-air ahead
-      of schedule (KC3SMW-7 message decoded by direwolf as an APRS Message,
-      number "1"). Still to formalize in `aprs.py` with 67-char enforcement.
-- [ ] Ack send on RX; retry queue with backoff on TX
-- [ ] Conversation UI: per-station threads, unread indicator, compose
+- [x] Message encode (`:ADDRESSEE:text{NN`), 67-char enforcement —
+      `aprs.encode_message()`, tested; proven on-air 2026-07-14.
+- [x] Ack send on RX — GUI auto-acks messages addressed to us
+      (`encode_ack()`); ack receipts shown in Chat.
+- [ ] Retry queue with backoff on unacked outbound messages
+- [x] Basic chat UI (send to a target, live RX). Per-station threads /
+      unread indicators still TODO.
 - [ ] Optional periodic status/position beacon (off by default)
 - [ ] ON-AIR TEST: two-way message with another station / digipeater
 
@@ -66,15 +71,26 @@
 - [ ] Retry/T1 timer tuning for 1200-baud AFSK realities
 - [ ] Unit tests with scripted frame exchanges
 
-## Phase 6 — Terminal Mode UI
-- [ ] Connect dialog (target call, digi path)
-- [ ] Session view: scrollback buffer, line input, disconnect key
-- [ ] ON-AIR TEST: connect to ChengmaniaBPQ, read messages on the BBS
+## Phase 6 — Desktop GUI (PyQt6, OpenWave-styled)
+> Direction change 2026-07-14: the UI is a **standalone PyQt6 windowed app**
+> resembling the OpenWave desktop program (not an in-terminal urwid TUI).
+> The urwid `ui.py` was built then replaced. Backends are UI-agnostic.
+- [x] Main window: OpenWave-style status bar (callsign accent + BT state),
+      four mode tabs (Chat / APRS / BBS / Winlink), `[MYCALL]:` input bar.
+      `uvprotermbt/gui/main_window.py`.
+- [x] Light/dark themes (OpenWave's navy/cyan palette + matched light),
+      toggle via View menu / Ctrl-T. `uvprotermbt/gui/theme.py`.
+- [x] Chat + APRS Monitor wired to the live link; BBS/Winlink screens ready
+      for the connected-mode backend.
+- [ ] BBS/Winlink session views once Phase 5 connected mode exists
+- [ ] Heard-stations panel; per-station message threads
 
 ## Phase 7 — Settings & Polish
-- [ ] Settings screen: callsign/SSID, path, BT target, beacon
-- [ ] JSON config persistence (user config dir)
-- [ ] README with usage guide
+- [x] Settings dialog: callsign/SSID, APRS path, BT target, theme —
+      `uvprotermbt/gui/settings_dialog.py`.
+- [x] JSON config persistence (user config dir) — `uvprotermbt/config.py`.
+- [ ] Beacon toggle in settings (field exists; no beacon sender yet)
+- [ ] README with usage guide + screenshots
 - [ ] PyInstaller executables (Linux primary, Windows stretch) via GitHub
       Actions release workflow
 

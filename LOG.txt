@@ -259,3 +259,40 @@ UVProTermBT — Session Log
   Mic-E), standard `!`/`=` position + `:` message parse, and the message
   ack/retry queue. The ax25 encode/decode is now a solid base; validate
   aprs.py against real off-air frames via the live link.
+
+2026-07-14 — Application layers + GUI (APRS layer, config, then PyQt6 app)
+- **Built the APRS + config layers** on top of ax25/kiss/link:
+  - `aprs.py`: message/ack encode (`:ADDR:text{id`, 67-char cap), packet
+    classifier (message/ack/reject/position/status/Mic-E/other), and a
+    heard-stations table. `tests/test_aprs.py` (7 tests) incl. round-trips
+    and the real on-air message + Mic-E beacon vectors. Mic-E is classified
+    and its comment surfaced; full lat/lon Mic-E decode still TODO.
+  - `config.py`: JSON Settings (callsign, ssid, bt_mac, aprs_path, theme,
+    beacon) persisted to the user config dir.
+- **First built a urwid terminal UI (`ui.py`)** — then learned it was the
+  wrong interpretation. Greg wanted a *standalone windowed GUI resembling
+  OpenWave* (which is a PyQt6 desktop app), not an in-terminal TUI. "Terminal
+  style" meant the aesthetic, not the medium.
+- **Pivoted to a PyQt6 desktop GUI** (`uvprotermbt/gui/`), removing the urwid
+  `ui.py`. All backend layers (link/kiss/ax25/aprs/config) were UI-agnostic
+  and reused unchanged — only the presentation layer changed.
+  - `theme.py`: OpenWave's exact palette (navy #1a1a2e, cyan #4fc3f7,
+    yellow/green/red) for dark, plus a matched light theme; Qt stylesheet.
+  - `main_window.py`: OpenWave-style status bar (callsign accent + ●/○ BT
+    indicator), four mode tabs (Chat/APRS/BBS/Winlink), `[MYCALL]:` input
+    bar. Chat + APRS Monitor wired to the live link via a QTimer draining
+    link.poll() on the Qt main thread (thread-safe GUI updates). Chat sends
+    APRS messages to a `/to`-settable target, auto-acks messages addressed
+    to us, renders `>>>` sent / `<call>:` RX / `*** ` sys like OpenWave.
+    Theme toggle re-renders all messages with the new palette.
+  - `settings_dialog.py`: callsign/SSID/MAC/path/theme editor.
+  - `__main__.py`: `python -m uvprotermbt` now boots the Qt app.
+- VERIFIED headlessly (QT_QPA_PLATFORM=offscreen): constructed the window,
+  seeded real frames, and rendered dark/light/monitor to PNG — all correct
+  and OpenWave-like. Full suite 22/22 green. requirements.txt: urwid→PyQt6.
+- BBS and Winlink are present as real tabbed screens that report "AX.25
+  connected mode is Phase 5" on /connect — the next backend to build.
+- NEXT: **Phase 5 — AX.25 connected-mode state machine** (SABM/UA, I/RR/RNR/
+  REJ, DISC/DM; T1/retry; window=1 first), pure + unit-tested before wiring
+  to the live link, then a BBS session view in the GUI (connect to
+  ChengmaniaBPQ). This unlocks the BBS + Winlink tabs.
