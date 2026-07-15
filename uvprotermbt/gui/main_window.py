@@ -15,13 +15,16 @@ from __future__ import annotations
 
 from datetime import datetime
 from html import escape
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction, QTextCursor
+from PyQt6.QtGui import QAction, QIcon, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QPushButton,
     QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
+
+ICON_PATH = Path(__file__).resolve().parent / "resources" / "icon.png"
 
 from .. import aprs, ax25_conn
 from ..ax25 import Address, decode_frame
@@ -71,6 +74,8 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         self.setWindowTitle(f"UVProTermBT — {self.settings.mycall}")
         self.setMinimumSize(900, 620)
+        if ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(ICON_PATH)))
 
         mb = self.menuBar()
         file_menu = QMenu("&File", self)
@@ -96,10 +101,17 @@ class MainWindow(QMainWindow):
 
         # status bar
         self._status_bar = QWidget()
-        self._status_bar.setFixedHeight(46)
+        self._status_bar.setFixedHeight(52)
         sb = QHBoxLayout(self._status_bar)
-        sb.setContentsMargins(10, 4, 12, 4)
+        sb.setContentsMargins(8, 4, 12, 4)
         sb.setSpacing(10)
+        if ICON_PATH.exists():
+            icon_lbl = QLabel()
+            icon_lbl.setPixmap(QPixmap(str(ICON_PATH)).scaled(
+                40, 40, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+            icon_lbl.setFixedSize(40, 40)
+            sb.addWidget(icon_lbl)
         self._cs_label = QLabel(self.settings.mycall)
         sb.addWidget(self._cs_label)
         self._sep1 = QLabel("│")

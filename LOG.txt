@@ -323,6 +323,9 @@ UVProTermBT — Session Log
   "H" → disconnect, plus a rendered BBS screenshot.
 - Winlink tab can establish the AX.25 session too; the B2F/FBB Winlink
   protocol on top is still TODO.
+- App icon: Greg supplied `icon.png` (UVPro terminal + globe + Bluetooth,
+  green/blue on black). Moved to `uvprotermbt/gui/resources/icon.png`, wired
+  as the window/taskbar icon and a 40×40 status-bar badge (OpenWave-style).
 - NEXT: **on-air test** — /connect the real ChengmaniaBPQ node (KC3SMW-10)
   over RF and read the BBS. Then Phase 5 polish (k>1 window, T1 tuning for
   1200-baud) and Mic-E lat/lon decode for the APRS monitor.
