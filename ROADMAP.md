@@ -66,10 +66,20 @@
 - [ ] ON-AIR TEST: two-way message with another station / digipeater
 
 ## Phase 5 — AX.25 Connected Mode
-- [ ] LAPB-ish state machine: SABM/UA, I-frames, RR/RNR, REJ, DISC
-- [ ] Window size 1 first (simplest), then k>1 if stable
-- [ ] Retry/T1 timer tuning for 1200-baud AFSK realities
-- [ ] Unit tests with scripted frame exchanges
+- [x] LAPB-ish state machine: SABM/UA, I-frames, RR/RNR/REJ, DISC/DM —
+      `uvprotermbt/ax25_conn.py` (pure, event-driven: returns frames to send
+      + data to deliver; caller owns the link + timer).
+- [x] Window size 1 (stop-and-wait) first — second outbound message queues
+      until the first is acked.
+- [x] Retry/T1 timer: `on_timer()` retransmits up to N2 then gives up; GUI
+      drives it with a 4 s QTimer. (k>1 and 1200-baud tuning still open.)
+- [x] Unit tests with scripted frame exchanges — `tests/test_ax25_conn.py`
+      (8): control-field round-trips, connect/data+ack/disconnect handshakes,
+      window-1 queueing, T1 give-up, out-of-sequence → REJ.
+- [x] Wired into the GUI BBS tab: `/connect <NODE>` runs the handshake,
+      node output streams into the terminal, typed lines go as I-frames,
+      `/bye` disconnects. Verified end-to-end headlessly (simulated node).
+- [ ] ON-AIR TEST: connect to ChengmaniaBPQ (KC3SMW-10) over real RF
 
 ## Phase 6 — Desktop GUI (PyQt6, OpenWave-styled)
 > Direction change 2026-07-14: the UI is a **standalone PyQt6 windowed app**
@@ -82,7 +92,8 @@
       toggle via View menu / Ctrl-T. `uvprotermbt/gui/theme.py`.
 - [x] Chat + APRS Monitor wired to the live link; BBS/Winlink screens ready
       for the connected-mode backend.
-- [ ] BBS/Winlink session views once Phase 5 connected mode exists
+- [x] BBS session view wired to Phase 5 connected mode (/connect, stream,
+      /bye). Winlink tab connects too; B2F protocol layer still TODO.
 - [ ] Heard-stations panel; per-station message threads
 
 ## Phase 7 — Settings & Polish

@@ -296,3 +296,33 @@ UVProTermBT — Session Log
   REJ, DISC/DM; T1/retry; window=1 first), pure + unit-tested before wiring
   to the live link, then a BBS session view in the GUI (connect to
   ChengmaniaBPQ). This unlocks the BBS + Winlink tabs.
+
+2026-07-14 — Phase 5: AX.25 connected mode (BBS/Winlink terminal)
+- **`ax25_conn.py`: connected-mode core, pure and event-driven.** Control-
+  field encode/decode (mod-8 I/S/U frames, P/F bit), connected-mode frame
+  builders (SABM/DISC/UA/DM/RR/RNR/REJ/I), and `Ax25Connection` — a
+  stop-and-wait (window=1) state machine. No I/O, threads, or wall-clock:
+  connect()/send()/disconnect()/on_receive()/on_timer() each return a Result
+  (frames to transmit, data to deliver up, state events); the caller owns the
+  link and the T1 timer. Keeps it fully unit-testable per the ground rule.
+  - Refactored `ax25.py` to expose `build_address_field(dest, source, path,
+    command=)` (command frames set dest C=1/source C=0; responses flip) and
+    made it accept digipeaters as Address OR (call, ssid) tuples — the tuple
+    bug bit both the APRS and connected paths, fixed once at the root.
+- **`tests/test_ax25_conn.py` (8):** control-field known values (SABM=0x3F
+  etc.) + round-trips, connect handshake, data+RR ack, window-1 queueing,
+  disconnect handshake, T1 retransmit-then-give-up (N2=3), out-of-sequence
+  I-frame → REJ. Full suite now **30/30**.
+- **Wired into the GUI BBS/Winlink tabs.** RX routing now splits UI frames
+  (control 0x03 → APRS) from connected-mode frames (→ the active session,
+  filtered to frames addressed to mycall). `/connect <NODE>` runs the SABM
+  handshake, the node's I-frame output streams into the terminal view (new
+  "raw" line style, no timestamp), typed lines go out as I-frames, `/bye`
+  disconnects. A 4 s QTimer drives T1. VERIFIED end-to-end headlessly against
+  a simulated node: connect → banner ("Welcome to ChengmaniaBPQ") → command
+  "H" → disconnect, plus a rendered BBS screenshot.
+- Winlink tab can establish the AX.25 session too; the B2F/FBB Winlink
+  protocol on top is still TODO.
+- NEXT: **on-air test** — /connect the real ChengmaniaBPQ node (KC3SMW-10)
+  over RF and read the BBS. Then Phase 5 polish (k>1 window, T1 tuning for
+  1200-baud) and Mic-E lat/lon decode for the APRS monitor.

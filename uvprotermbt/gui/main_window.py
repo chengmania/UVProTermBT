@@ -23,8 +23,8 @@ from PyQt6.QtWidgets import (
     QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from .. import aprs
-from ..ax25 import Address
+from .. import aprs, ax25_conn
+from ..ax25 import Address, decode_frame
 from ..config import Settings
 from ..kiss import KissDecoder, encode_frame
 from ..link import RfcommKissLink, dbus_available
@@ -47,6 +47,8 @@ class MainWindow(QMainWindow):
         self._heard = aprs.HeardTable()
         self._chat_target = "CQ"
         self._msg_seq = 0
+        self._session: ax25_conn.Ax25Connection | None = None  # BBS/terminal
+        self._t1 = None
         # per-tab message records, so a theme switch can re-render with new colors
         self._records: dict[str, list[tuple]] = {m: [] for m in MODES}
         self._views: dict[str, QTextEdit] = {}
@@ -59,8 +61,8 @@ class MainWindow(QMainWindow):
 
         self._sys(CHAT, f"UVProTermBT — {settings.mycall}  |  chat target: {self._chat_target}")
         self._sys(MONITOR, "APRS monitor — decoded traffic from the UV-Pro appears here")
-        self._sys(BBS, "BBS terminal — /connect <NODE> once AX.25 connected mode lands (Phase 5)")
-        self._sys(WINLINK, "Winlink — needs AX.25 connected mode + B2F (Phase 5+)")
+        self._sys(BBS, "BBS terminal — /connect <NODE> to start an AX.25 session (e.g. /connect KC3SMW-10); /bye to disconnect")
+        self._sys(WINLINK, "Winlink — AX.25 connect works (/connect <RMS>); the B2F/Winlink protocol layer is still TODO")
 
         self._start_link()
 
@@ -186,6 +188,8 @@ class MainWindow(QMainWindow):
             source, tag, summary = rec[2], rec[3], rec[4]
             return (f'<span style="color:{p.accent}">[{ts}] {escape(source)} </span>'
                     f'<span style="color:{p.text}">[{escape(tag)}] {escape(summary)}</span>')
+        if kind == "raw":  # BBS/terminal stream line (no timestamp prefix)
+            return f'<span style="color:{p.text}">{escape(rec[2])}</span>'
         return escape(str(rec))
 
     def _append_html(self, mode: str, html: str) -> None:
@@ -212,19 +216,53 @@ class MainWindow(QMainWindow):
     # ---- link RX --------------------------------------------------------
 
     def _on_rx_bytes(self, data: bytes) -> None:
-        for frame in self._decoder.feed(data):
-            pkt = aprs.parse_kiss_payload(frame.payload)
-            if pkt is None:
+        for kframe in self._decoder.feed(data):
+            try:
+                ax = decode_frame(kframe.payload)
+            except ValueError:
                 continue
-            self._heard.note(pkt)
-            self._record(MONITOR, ("mon", _ts(), pkt.source, pkt.kind.value, pkt.summary()))
-            if pkt.kind is aprs.Kind.MESSAGE:
-                self._rx(CHAT, pkt.source, pkt.text)
-                if pkt.addressee.strip().upper() == self.settings.mycall and pkt.msg_id:
-                    self._send_ack(pkt.source, pkt.msg_id)
-            elif pkt.kind is aprs.Kind.ACK:
-                if pkt.addressee.strip().upper() == self.settings.mycall:
-                    self._sys(CHAT, f"{pkt.source} acked message {pkt.msg_id}")
+            if ax.control == 0x03:          # UI frame -> APRS
+                self._route_aprs(aprs.parse_frame(ax))
+            else:                            # connected-mode frame -> session
+                self._route_connected(ax, kframe.payload)
+
+    def _route_aprs(self, pkt: aprs.AprsPacket) -> None:
+        self._heard.note(pkt)
+        self._record(MONITOR, ("mon", _ts(), pkt.source, pkt.kind.value, pkt.summary()))
+        if pkt.kind is aprs.Kind.MESSAGE:
+            self._rx(CHAT, pkt.source, pkt.text)
+            if pkt.addressee.strip().upper() == self.settings.mycall and pkt.msg_id:
+                self._send_ack(pkt.source, pkt.msg_id)
+        elif pkt.kind is aprs.Kind.ACK:
+            if pkt.addressee.strip().upper() == self.settings.mycall:
+                self._sys(CHAT, f"{pkt.source} acked message {pkt.msg_id}")
+
+    def _route_connected(self, ax, raw: bytes) -> None:
+        if self._session is None:
+            return
+        if str(ax.dest).upper() != self.settings.mycall:  # not addressed to us
+            return
+        self._handle_conn_result(self._session.on_receive(raw))
+
+    def _handle_conn_result(self, res) -> None:
+        for fb in res.send:
+            if self.link.is_connected():
+                self.link.send(encode_frame(fb))
+        for chunk in res.deliver:
+            self._bbs_out(chunk.decode("ascii", "replace"))
+        for ev in res.events:
+            if ev == "connected":
+                self._sys(BBS, f"connected to {self._session.remote}")
+            elif ev == "disconnected":
+                self._sys(BBS, "disconnected")
+                self._session = None
+                if self._t1 is not None:
+                    self._t1.stop()
+
+    def _bbs_out(self, text: str) -> None:
+        for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            if line:
+                self._record(BBS, ("raw", _ts(), line))
 
     # ---- TX -------------------------------------------------------------
 
@@ -268,8 +306,8 @@ class MainWindow(QMainWindow):
             self._send_message(text)
         elif mode == MONITOR:
             self._sys(MONITOR, "monitor is receive-only; use the Chat tab to send")
-        else:
-            self._sys(mode, "not connected — AX.25 connected mode is Phase 5")
+        elif mode in (BBS, WINLINK):
+            self._bbs_send_line(text)
 
     def _command(self, text: str) -> None:
         parts = text.split()
@@ -281,12 +319,54 @@ class MainWindow(QMainWindow):
             self._update_target_label()
             self._sys(CHAT, f"chat target set to {self._chat_target}")
         elif cmd == "/connect" and arg:
-            self._sys(mode, f"connect to {arg.upper()} — AX.25 connected mode not yet "
-                            "implemented (Phase 5). This screen is ready for it.")
+            self._bbs_connect(arg.upper())
+        elif cmd in ("/disconnect", "/bye", "/d"):
+            self._bbs_disconnect()
         elif cmd == "/theme":
             self._toggle_theme()
         else:
             self._sys(mode, f"unknown command: {text}")
+
+    # ---- BBS / connected-mode terminal ----------------------------------
+
+    def _bbs_connect(self, node: str) -> None:
+        if not self.link.is_connected():
+            self._sys(BBS, "not connected to the radio — cannot start a session")
+            return
+        if self._session is not None:
+            self._sys(BBS, f"already in a session with {self._session.remote}; /bye first")
+            return
+        call, _, ssid = node.partition("-")
+        remote = Address(call.upper(), int(ssid or 0))
+        local = Address(self.settings.callsign, self.settings.ssid)
+        self._session = ax25_conn.Ax25Connection(local, remote, self.settings.path_list())
+        self._sys(BBS, f"connecting to {remote} …")
+        self._handle_conn_result(self._session.connect())
+        self._ensure_t1()
+
+    def _bbs_disconnect(self) -> None:
+        if self._session is None:
+            self._sys(self._current_mode(), "no active session")
+            return
+        self._handle_conn_result(self._session.disconnect())
+
+    def _bbs_send_line(self, text: str) -> None:
+        if self._session is None or self._session.state is not ax25_conn.State.CONNECTED:
+            self._sys(self._current_mode(),
+                      "not connected — use /connect <NODE> first")
+            return
+        self._record(self._current_mode(), ("tx", _ts(), text))
+        self._handle_conn_result(self._session.send((text + "\r").encode("ascii", "replace")))
+
+    def _ensure_t1(self) -> None:
+        if self._t1 is None:
+            self._t1 = QTimer(self)
+            self._t1.timeout.connect(self._on_t1)
+        self._t1.start(4000)
+
+    def _on_t1(self) -> None:
+        if self._session is not None:
+            self._handle_conn_result(self._session.on_timer())
 
     def _update_target_label(self) -> None:
         self._target_label.setText(f"chat target: {self._chat_target}")

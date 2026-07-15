@@ -80,6 +80,32 @@ def _decode_address(chunk: bytes) -> tuple[str, int, bool, bool]:
     return call, ssid, top_bit, last
 
 
+def build_address_field(
+    dest: Address,
+    source: Address,
+    path: list[Address] | tuple[Address, ...] = (),
+    *,
+    command: bool = True,
+) -> bytes:
+    """Encode the dest+source(+digis) address field.
+
+    In AX.25 v2 the top bit of the SSID byte is the command/response (C) bit:
+    a *command* frame sets dest C=1, source C=0; a *response* frame flips
+    them. UI/APRS frames are commands. The extension bit marks the last
+    address.
+    """
+    # Accept digipeaters as Address objects or (call, ssid) tuples.
+    path = [d if isinstance(d, Address) else Address(d[0], d[1]) for d in path]
+    dest_c = 1 if command else 0
+    src_c = 0 if command else 1
+    out = bytearray()
+    out += _encode_address(dest, last=False, cbit=dest_c)
+    out += _encode_address(source, last=not path, cbit=src_c)
+    for i, digi in enumerate(path):
+        out += _encode_address(digi, last=(i == len(path) - 1), cbit=0)
+    return bytes(out)
+
+
 def encode_ui_frame(
     source: Address,
     dest: Address,
@@ -92,12 +118,7 @@ def encode_ui_frame(
     source C bit = 0, digipeaters C/H bit = 0, and the extension bit is set
     on whichever address is last.
     """
-    path = list(path)
-    out = bytearray()
-    out += _encode_address(dest, last=False, cbit=1)
-    out += _encode_address(source, last=not path, cbit=0)
-    for i, digi in enumerate(path):
-        out += _encode_address(digi, last=(i == len(path) - 1), cbit=0)
+    out = bytearray(build_address_field(dest, source, path, command=True))
     out.append(CONTROL_UI)
     out.append(PID_NO_LAYER3)
     out += info
