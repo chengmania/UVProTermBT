@@ -341,3 +341,31 @@ UVProTermBT — Session Log
 - Fix: connected mode goes DIRECT by default; added `/connect NODE via
   D1,D2` for an explicit real digipeater/node path. Never uses the APRS
   path. Verified headlessly.
+
+2026-07-15 — AX.25 2.2 spec review + connected-mode diagnostics
+- Greg added the official AX.25 v2.2 spec (docs/AX25.2.2-Jul 98-2.pdf).
+  Reviewed it against ax25_conn.py. Findings:
+  - Our SABM encoding is correct (§6.1.2: command = dest C-bit 1 / source 0).
+  - The connect→T1→UA/DM flow (§6.3.1) and DISC teardown (§6.3.4) match ours.
+  - Two defaults were off-spec: N2 retries was 3 (spec default 10), T1 was
+    4000 ms (spec default 3000 ms). Fixed both.
+- **Key insight for the open BBS-connect bug:** §4.3.3.1/§6.3.1 — a node that
+  *receives* a SABM MUST answer UA (accept) or DM (refuse). Our frame is
+  byte-correct and direwolf hears it, yet the node is silent → it never
+  received it → RF/frequency, not our code. The app couldn't show this before
+  (DM and timeout both printed "disconnected").
+- Change: ax25_conn now emits distinct outcome events — `"refused"` on DM
+  (peer heard us, declined) vs `"failed"` on give-up after N2 (peer isn't
+  hearing us); `"disconnected"` still for clean DISC/UA. GUI shows different,
+  actionable BBS messages for each. N2→10, T1→3000 ms. `/bye` now aborts a
+  pending (not-yet-connected) session instead of leaving it to retry N2×T1.
+- Tests: test_ax25_conn.py updated (give-up now asserts "failed", N2=10) +
+  new test_dm_response_is_refused. Full suite 31/31. Verified the GUI
+  refused/failed/abort paths headlessly (offscreen).
+- docs/PROTOCOL.md §8 (new): AX.25 connected-mode notes — C-bit rule,
+  UA/DM-vs-silence diagnostic, spec defaults, SABME/FRMR version detection,
+  direct-connect (no APRS path) rule. Committed the spec PDF.
+- NEXT (Greg, at the radio): /connect KC3SMW-7 direct on the BBS frequency —
+  the app now reports "refused" (node heard you) vs "isn't hearing you",
+  which resolves yesterday's open question. Then: Mic-E lat/lon decode,
+  optional T3 keep-alive / v2.2 SABME negotiation, Winlink B2F.

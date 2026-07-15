@@ -124,7 +124,7 @@ class Result:
     events: list[str] = field(default_factory=list)   # "connected"/"disconnected"/...
 
 
-_MAX_RETRIES = 3  # N2
+_MAX_RETRIES = 10  # N2 — AX.25 2.2 §6.3.2 default (was 3; too few for lossy RF)
 
 
 class Ax25Connection:
@@ -200,17 +200,24 @@ class Ax25Connection:
         return Result()
 
     def on_timer(self) -> Result:
-        """Caller's T1 expired: retransmit the last command, or give up."""
+        """Caller's T1 expired: retransmit the last command, or give up after
+        N2 tries. Give-up events distinguish outcomes so the UI can explain
+        them: a connect that never got a UA/DM (the node isn't hearing us) and
+        a lost link are "failed"; giving up on our own DISC is "disconnected"
+        (we were tearing down anyway)."""
         if self.state in (State.CONNECTING, State.DISCONNECTING) and self._last_cmd:
             if self.retries >= _MAX_RETRIES:
+                # "failed" if we never established (connect gave up); but if we
+                # were tearing down, we're disconnected regardless.
+                event = "disconnected" if self.state is State.DISCONNECTING else "failed"
                 self.state = State.DISCONNECTED
-                return Result(events=["disconnected"])
+                return Result(events=[event])
             self.retries += 1
             return Result(send=[self._last_cmd])
         if self.state is State.CONNECTED and self._outstanding is not None:
             if self.retries >= _MAX_RETRIES:
                 self.state = State.DISCONNECTED
-                return Result(events=["disconnected"])
+                return Result(events=["failed"])
             self.retries += 1
             frame = build_frame(self.remote, self.local,
                                 Control(FrameKind.I, pf=True, ns=(self.vs - 1) % 8,
@@ -249,9 +256,12 @@ class Ax25Connection:
         return Result()
 
     def _on_dm(self) -> Result:
+        # A DM means the peer heard us but declined / can't accept (§4.3.3.5).
+        # "refused" (vs a silent timeout) tells the user the node IS hearing them.
         if self.state in (State.CONNECTING, State.CONNECTED, State.DISCONNECTING):
+            was_disconnecting = self.state is State.DISCONNECTING
             self.state = State.DISCONNECTED
-            return Result(events=["disconnected"])
+            return Result(events=["disconnected" if was_disconnecting else "refused"])
         return Result()
 
     def _on_iframe(self, c: Control, info: bytes) -> Result:

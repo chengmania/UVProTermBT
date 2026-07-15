@@ -265,11 +265,25 @@ class MainWindow(QMainWindow):
         for ev in res.events:
             if ev == "connected":
                 self._sys(BBS, f"connected to {self._session.remote}")
+            elif ev == "refused":
+                # Peer sent a DM: it HEARD us and declined (AX.25 2.2 §4.3.3.5).
+                self._sys(BBS, "node refused the connection (DM) — it heard you "
+                               "but declined. Is it busy, or does it require a login?")
+                self._end_session()
+            elif ev == "failed":
+                # No UA/DM after N2 tries: the node isn't hearing us at all.
+                self._sys(BBS, "no response after repeated tries — the node isn't "
+                               "hearing you. Check the UV-Pro is on the BBS frequency, "
+                               "try /connect <NODE> via <digi>, or a different SSID.")
+                self._end_session()
             elif ev == "disconnected":
                 self._sys(BBS, "disconnected")
-                self._session = None
-                if self._t1 is not None:
-                    self._t1.stop()
+                self._end_session()
+
+    def _end_session(self) -> None:
+        self._session = None
+        if self._t1 is not None:
+            self._t1.stop()
 
     def _bbs_out(self, text: str) -> None:
         for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -377,6 +391,13 @@ class MainWindow(QMainWindow):
         if self._session is None:
             self._sys(self._current_mode(), "no active session")
             return
+        # If we're still trying to connect (no UA yet), session.disconnect() is a
+        # no-op, so abort the pending attempt locally instead of leaving it to
+        # retry for N2×T1.
+        if self._session.state is not ax25_conn.State.CONNECTED:
+            self._sys(BBS, "aborted pending connect")
+            self._end_session()
+            return
         self._handle_conn_result(self._session.disconnect())
 
     def _bbs_send_line(self, text: str) -> None:
@@ -391,7 +412,7 @@ class MainWindow(QMainWindow):
         if self._t1 is None:
             self._t1 = QTimer(self)
             self._t1.timeout.connect(self._on_t1)
-        self._t1.start(4000)
+        self._t1.start(3000)  # T1 — AX.25 2.2 §6.7.1.1 default
 
     def _on_t1(self) -> None:
         if self._session is not None:

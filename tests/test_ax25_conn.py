@@ -117,14 +117,25 @@ def test_disconnect_handshake():
 
 # ---- timers / retransmit ----
 
-def test_t1_retransmits_then_gives_up():
+def test_t1_retransmits_then_fails():
+    from uvprotermbt.ax25_conn import _MAX_RETRIES
     a = Ax25Connection(X, Y)
     a.connect()
-    for _ in range(3):  # N2 retries
+    for _ in range(_MAX_RETRIES):  # N2 retries
         r = a.on_timer()
         assert len(r.send) == 1 and a.state is State.CONNECTING
-    r = a.on_timer()  # exceeded -> give up
-    assert a.state is State.DISCONNECTED and "disconnected" in r.events
+    r = a.on_timer()  # exceeded -> give up; connect never established
+    assert a.state is State.DISCONNECTED and r.events == ["failed"]
+
+
+def test_dm_response_is_refused():
+    from uvprotermbt.ax25_conn import build_frame, Control, FrameKind
+    a = Ax25Connection(X, Y)
+    a.connect()  # -> CONNECTING
+    dm = build_frame(X, Y, Control(FrameKind.DM, pf=True), command=False)
+    r = a.on_receive(dm)
+    assert a.state is State.DISCONNECTED
+    assert r.events == ["refused"]  # node heard us and declined, not a timeout
 
 
 # ---- error recovery ----
