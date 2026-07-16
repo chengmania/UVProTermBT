@@ -196,7 +196,7 @@ class Ax25Connection:
         if kind is FrameKind.I:
             return self._on_iframe(c, f.info)
         if kind in (FrameKind.RR, FrameKind.RNR, FrameKind.REJ):
-            return self._on_supervisory(c)
+            return self._on_supervisory(c, f.command)
         return Result()
 
     def on_timer(self) -> Result:
@@ -276,20 +276,31 @@ class Ax25Connection:
         if c.ns == self.vr:  # in-sequence
             self.vr = (self.vr + 1) % 8
             res.deliver.append(info)
-            res.send.append(self._sframe(FrameKind.RR, self.vr, c.pf))
+            # Defer the ack unless polled (P=1). Acking every frame of a burst
+            # would put us into TX after each one and, on this half-duplex link,
+            # make us miss the rest of the sender's window (§6.4.2). BPQ sets
+            # P=1 on the last frame of a window, so we ack the whole burst then.
+            if c.pf:
+                res.send.append(self._sframe(FrameKind.RR, self.vr, True))
         else:  # out of sequence: ask for the one we expect
             res.send.append(self._sframe(FrameKind.REJ, self.vr, c.pf))
         return res
 
-    def _on_supervisory(self, c: Control) -> Result:
+    def _on_supervisory(self, c: Control, command: bool) -> Result:
         res = Result()
         if self.state is not State.CONNECTED:
             return res
         # RR/RNR/REJ all acknowledge via N(R) first.
         self._apply_ack(c.nr, res)
-        # REJ additionally asks us to retransmit anything still unacked.
         if c.kind is FrameKind.REJ and self._outstanding is not None:
+            # REJ asks us to retransmit anything still unacked.
             res.send.append(self._resend_iframe())
+        elif c.pf and command:
+            # Answer a poll — a supervisory *command* with P=1 — with an RR
+            # response, F=1, carrying our current N(R) (§6.2). BPQ polls like
+            # this after a burst to confirm we received the whole window. A
+            # *response* with F=1 (the node acking us) must NOT be answered.
+            res.send.append(self._sframe(FrameKind.RR, self.vr, True))
         return res
 
     def _apply_ack(self, nr: int, res: Result) -> None:

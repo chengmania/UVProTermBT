@@ -391,3 +391,28 @@ UVProTermBT — Session Log
   but earlier logs suggest we may miss its immediate post-TX ack/reply — if
   the exchange is still flaky after this fix, look at the UV-Pro's TX tail /
   RX turnaround (same family as the TXDELAY that fixed connect).
+
+2026-07-15 — Bugfix: half-duplex ack storm on I-frame bursts + poll response
+- After the N(R)-ack fix, BBS sessions worked (connect, welcome, commands,
+  real BPQ content, "Hello Greg you have 1 messages"). But listing messages
+  ("lm") failed: the node streamed the list as a burst of I-frames (n(s)=3..0,
+  first five p=0, last p=1). Our app showed only the FIRST and then the node
+  polled RR n(r)=2 p=1 forever until it dropped us. Greg: "it buffers full and
+  fails."
+- Root cause (half-duplex ack storm): we sent an RR after EVERY received
+  I-frame. So we'd receive n(s)=3, immediately key TX to ack it, and go deaf
+  for the rest of the node's burst (n(s)=4..0) — losing them on the air.
+- Fixes (AX.25 §6.4.2 / §6.2):
+  - Defer acks: only send an RR for a received I-frame when it's polled
+    (P=1). BPQ sets P=1 on the last frame of a window, so we stay in RX for
+    the whole burst then ack it all with one RR. Out-of-sequence still REJs.
+  - Answer polls: a supervisory *command* with P=1 (the node's RR poll) now
+    gets an RR response with F=1 and our N(R). Must distinguish command vs
+    response — added `command` (dest C-bit) to Ax25Frame/decode_frame so we
+    never "answer" the node's own RR *responses* (that caused an RR loop; a
+    unit test caught it).
+- Tests: test_burst_defers_ack_until_polled + test_responds_to_supervisory_poll
+  (both crafted from the live log). Suite 35/35. Verified the full "lm"
+  burst + poll end-to-end through the GUI headless: all lines delivered, one
+  ack, poll answered.
+- NEXT (Greg): pull the branch and retry `lm` / longer BBS output on the air.

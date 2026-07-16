@@ -190,3 +190,38 @@ def test_rej_after_ack_does_not_resend():
     rej = build_frame(X, Y, Control(FrameKind.REJ, pf=True, nr=1), command=False)
     r = a.on_receive(rej)
     assert r.send == []                    # nothing outstanding -> no resend
+
+
+# ---- half-duplex ack-storm regression (the "lm" message-list burst) ----
+
+def test_burst_defers_ack_until_polled():
+    # The node streams a window as I-frames P=0 ... P=0, last one P=1. We must
+    # deliver them all and send exactly ONE ack (at the poll), not one RR per
+    # frame — acking each would key TX mid-burst and lose the rest on the air.
+    from uvprotermbt.ax25_conn import build_frame, Control, FrameKind
+    a = Ax25Connection(X, Y)
+    a.state = State.CONNECTED
+    a.vr = 0
+    delivered, sent = [], []
+    burst = [(0, False), (1, False), (2, True)]  # last one polls
+    for i, (ns, pf) in enumerate(burst):
+        f = build_frame(X, Y, Control(FrameKind.I, pf=pf, ns=ns, nr=0),
+                        command=True, info=bytes([65 + i]))  # A, B, C
+        r = a.on_receive(f)
+        delivered += r.deliver
+        sent += r.send
+    assert delivered == [b"A", b"B", b"C"]     # every frame delivered
+    assert len(sent) == 1                       # only the poll got an ack
+    ctrl = decode_control(decode_frame(sent[0]).control)
+    assert ctrl.kind is FrameKind.RR and ctrl.nr == 3 and ctrl.pf is True
+
+
+def test_responds_to_supervisory_poll():
+    from uvprotermbt.ax25_conn import build_frame, Control, FrameKind
+    a = Ax25Connection(X, Y)
+    a.state = State.CONNECTED
+    a.vr = 3
+    poll = build_frame(X, Y, Control(FrameKind.RR, pf=True, nr=0), command=True)
+    r = a.on_receive(poll)
+    ctrl = decode_control(decode_frame(r.send[0]).control)
+    assert ctrl.kind is FrameKind.RR and ctrl.nr == 3 and ctrl.pf is True

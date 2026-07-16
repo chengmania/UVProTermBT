@@ -45,6 +45,7 @@ class Ax25Frame:
     control: int = CONTROL_UI
     pid: int = PID_NO_LAYER3
     info: bytes = b""
+    command: bool = True  # from the C-bits: True = command (dest C=1), else response
 
     def header_str(self) -> str:
         """e.g. 'KC3SMW-7 > APZUVT-0 via WIDE1-1,WIDE2-1'."""
@@ -147,6 +148,8 @@ def decode_frame(data: bytes) -> Ax25Frame:
     # and H (has-been-repeated) only on digipeaters.
     dest = Address(raw[0][0], raw[0][1])
     source = Address(raw[1][0], raw[1][1])
+    # C-bit: a v2 command sets the destination C-bit; a response clears it.
+    command = raw[0][2]
     path = [Address(c, s, has_been_repeated=h) for c, s, h in raw[2:]]
     control = data[i] if i < len(data) else CONTROL_UI
     i += 1
@@ -158,4 +161,4 @@ def decode_frame(data: bytes) -> Ax25Frame:
         i += 1
     info = data[i:]
     return Ax25Frame(dest=dest, source=source, path=path,
-                     control=control, pid=pid, info=info)
+                     control=control, pid=pid, info=info, command=command)
