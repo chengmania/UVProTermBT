@@ -267,35 +267,46 @@ class Ax25Connection:
     def _on_iframe(self, c: Control, info: bytes) -> Result:
         if self.state is not State.CONNECTED:
             return Result()
+        res = Result()
+        # Every I frame's N(R) acknowledges our sent frames (AX.25 §6.4.6) —
+        # process the piggybacked ack BEFORE the sequence number, or a
+        # command+response exchange deadlocks (we'd resend an already-acked
+        # frame forever while the peer REJs it).
+        self._apply_ack(c.nr, res)
         if c.ns == self.vr:  # in-sequence
             self.vr = (self.vr + 1) % 8
-            rr = build_frame(self.remote, self.local,
-                             Control(FrameKind.RR, pf=c.pf, nr=self.vr),
-                             command=False, path=self.path)
-            return Result(send=[rr], deliver=[info])
-        # out of sequence: ask for the expected one
-        rej = build_frame(self.remote, self.local,
-                          Control(FrameKind.REJ, pf=c.pf, nr=self.vr),
-                          command=False, path=self.path)
-        return Result(send=[rej])
+            res.deliver.append(info)
+            res.send.append(self._sframe(FrameKind.RR, self.vr, c.pf))
+        else:  # out of sequence: ask for the one we expect
+            res.send.append(self._sframe(FrameKind.REJ, self.vr, c.pf))
+        return res
 
     def _on_supervisory(self, c: Control) -> Result:
         res = Result()
         if self.state is not State.CONNECTED:
             return res
-        if c.kind is FrameKind.REJ:
-            if self._outstanding is not None:
-                res.send.append(self._resend_iframe())
-            return res
-        # RR/RNR: c.nr acknowledges frames up to nr-1
-        if self._outstanding is not None and c.nr == self.vs:
+        # RR/RNR/REJ all acknowledge via N(R) first.
+        self._apply_ack(c.nr, res)
+        # REJ additionally asks us to retransmit anything still unacked.
+        if c.kind is FrameKind.REJ and self._outstanding is not None:
+            res.send.append(self._resend_iframe())
+        return res
+
+    def _apply_ack(self, nr: int, res: Result) -> None:
+        """Acknowledge our outstanding I frame if N(R) covers it (window=1:
+        N(R) == V(S) means the peer has our last frame). Release the window
+        and send the next queued frame, if any."""
+        if self._outstanding is not None and nr == self.vs:
             self._outstanding = None
             self.retries = 0
             if self._pending:
                 res.send.append(self._send_iframe(self._pending.pop(0)))
-        return res
 
     # -- helpers --
+
+    def _sframe(self, kind: FrameKind, nr: int, pf: bool) -> bytes:
+        return build_frame(self.remote, self.local, Control(kind, pf=pf, nr=nr),
+                           command=False, path=self.path)
 
     def _u(self, kind: FrameKind, *, command: bool, pf: bool) -> bytes:
         return build_frame(self.remote, self.local, Control(kind, pf=pf),

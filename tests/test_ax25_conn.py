@@ -1,4 +1,4 @@
-from uvprotermbt.ax25 import Address
+from uvprotermbt.ax25 import Address, decode_frame
 from uvprotermbt.ax25_conn import (
     Ax25Connection,
     Control,
@@ -153,5 +153,40 @@ def test_out_of_sequence_iframe_triggers_rej():
 
 
 def decode_control_kind(frame_bytes):
-    from uvprotermbt.ax25 import decode_frame
     return decode_control(decode_frame(frame_bytes).control).kind
+
+
+# ---- piggybacked-ack regression (the BBS command-response deadlock) ----
+
+def test_iframe_nr_acknowledges_our_outstanding():
+    # Reproduces the live BBS bug: after we send a command (frame 0), the node
+    # replies with its OWN I-frame whose N(R)=1 piggybacks the ack of our
+    # frame. We must clear our window and accept the reply, not resend frame 0.
+    from uvprotermbt.ax25_conn import build_frame, Control, FrameKind
+    a = Ax25Connection(X, Y)
+    a.state = State.CONNECTED
+    a.vr = 1  # already acked the node's welcome frame
+    a.send(b"?\r")  # our command -> ns=0, vs=1, outstanding set
+    assert a._outstanding == b"?\r" and a.vs == 1
+
+    node_reply = build_frame(X, Y, Control(FrameKind.I, pf=True, ns=1, nr=1),
+                             command=True, info=b"menu\r")
+    r = a.on_receive(node_reply)
+    assert a._outstanding is None          # piggybacked N(R)=1 acked frame 0
+    assert r.deliver == [b"menu\r"]        # reply delivered
+    assert a.vr == 2
+    ctrl = decode_control(decode_frame(r.send[0]).control)
+    assert ctrl.kind is FrameKind.RR and ctrl.nr == 2   # not a resend of "?"
+
+
+def test_rej_after_ack_does_not_resend():
+    from uvprotermbt.ax25_conn import build_frame, Control, FrameKind
+    a = Ax25Connection(X, Y)
+    a.state = State.CONNECTED
+    a.vr = 1
+    a.send(b"?\r")  # ns=0, vs=1, outstanding
+    a.on_receive(build_frame(X, Y, Control(FrameKind.RR, nr=1), command=False))
+    assert a._outstanding is None          # acked
+    rej = build_frame(X, Y, Control(FrameKind.REJ, pf=True, nr=1), command=False)
+    r = a.on_receive(rej)
+    assert r.send == []                    # nothing outstanding -> no resend
