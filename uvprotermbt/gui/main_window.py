@@ -13,6 +13,7 @@ updates are thread-safe.
 
 from __future__ import annotations
 
+import random
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -431,7 +432,10 @@ class MainWindow(QMainWindow):
         if self._t1 is None:
             return
         if self._session is not None and self._session.awaiting_response:
-            self._t1.start(3000)  # T1 — AX.25 2.2 §6.7.1.1 default
+            # T1 base ≈ 3 s (AX.25 2.2 §6.7.1.1) plus random jitter so repeated
+            # retransmits don't collide at the same phase on a busy/half-duplex
+            # channel (§6.3.6.1 collision recovery).
+            self._t1.start(random.randint(3000, 5000))
         else:
             self._t1.stop()
 

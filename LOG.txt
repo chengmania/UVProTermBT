@@ -445,3 +445,25 @@ UVProTermBT — Session Log
 - Tests: test_awaiting_response_drives_t1 + headless GUI verification (T1
   active on send, off on ack, stale fire doesn't retransmit, unacked fire
   retransmits exactly once and re-arms). Suite 36/36.
+
+2026-07-15 — Resilience: T1 jitter + more retries; beacon/UV-Pro TX finding
+- FINDING (not our code): during a BBS session, the node's digipeated ID
+  beacon (KC3SMW-7>ID,W3SK: ...) congests the shared half-duplex channel and
+  the UV-Pro's KISS TNC then "refuses to send packets" — its transmit path
+  wedges. Verified by simulation that our app handles the beacon correctly
+  (it's a UI frame -> APRS monitor; the connected-mode session state and the
+  following ack are untouched). So this is a UV-Pro TNC / RF-contention issue,
+  not a protocol bug. Greg can't/won't change the node (it works with other
+  clients), so the fix on our end is resilience, not correctness.
+- Changes (AX.25 §6.3.6.1 collision recovery, §6.7.1.1):
+  - T1 retransmit now has random jitter (base 3 s + up to 2 s) so repeated
+    retries don't collide at the same phase during contention. Jitter lives
+    in the GUI's _arm_t1 (the state machine stays deterministic/testable).
+  - N2 15 (was 10) for extra patience so a burst of beacon/contention doesn't
+    drop the link before it clears.
+- Verified headlessly: T1 intervals spread across 3000-5000 ms, cancelled on
+  ack; N2=15. Suite 36/36 (the N2 give-up test reads _MAX_RETRIES).
+- Still limited by the UV-Pro's TX behavior under channel contention — if the
+  radio's KISS TX wedges, retries can't help. Worth noting for users: keep
+  the UV-Pro's own APRS beacon OFF while using it as a KISS TNC, and prefer a
+  quieter frequency for connected-mode/BBS work.

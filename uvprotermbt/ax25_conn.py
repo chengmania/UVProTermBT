@@ -124,7 +124,9 @@ class Result:
     events: list[str] = field(default_factory=list)   # "connected"/"disconnected"/...
 
 
-_MAX_RETRIES = 10  # N2 — AX.25 2.2 §6.3.2 default (was 3; too few for lossy RF)
+_MAX_RETRIES = 15  # N2 — above the 2.2 §6.3.2 default of 10; extra patience so
+                   # a burst of channel contention (e.g. the node's digipeated
+                   # ID beacon stepping on the session) doesn't drop the link.
 
 
 class Ax25Connection:
