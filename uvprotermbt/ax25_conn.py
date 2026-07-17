@@ -124,7 +124,9 @@ class Result:
     events: list[str] = field(default_factory=list)   # "connected"/"disconnected"/...
 
 
-_MAX_RETRIES = 3  # N2
+_MAX_RETRIES = 15  # N2 — above the 2.2 §6.3.2 default of 10; extra patience so
+                   # a burst of channel contention (e.g. the node's digipeated
+                   # ID beacon stepping on the session) doesn't drop the link.
 
 
 class Ax25Connection:
@@ -146,6 +148,16 @@ class Ax25Connection:
         self._pending: list[bytes] = []          # queued outbound info
         self._last_cmd: bytes | None = None       # for retransmit (SABM/DISC/I)
         self.retries = 0
+
+    @property
+    def awaiting_response(self) -> bool:
+        """True when the acknowledgment timer T1 should be running: we're
+        mid-handshake, or we have an unacked I frame outstanding. The caller
+        arms/cancels its T1 from this after every event, so T1 is (re)started
+        per transmission and stopped on ack (AX.25 §6.7.1.1) — never left
+        free-running (which prematurely retransmits)."""
+        return (self.state in (State.CONNECTING, State.DISCONNECTING)
+                or self._outstanding is not None)
 
     # -- local actions --
 
@@ -196,21 +208,28 @@ class Ax25Connection:
         if kind is FrameKind.I:
             return self._on_iframe(c, f.info)
         if kind in (FrameKind.RR, FrameKind.RNR, FrameKind.REJ):
-            return self._on_supervisory(c)
+            return self._on_supervisory(c, f.command)
         return Result()
 
     def on_timer(self) -> Result:
-        """Caller's T1 expired: retransmit the last command, or give up."""
+        """Caller's T1 expired: retransmit the last command, or give up after
+        N2 tries. Give-up events distinguish outcomes so the UI can explain
+        them: a connect that never got a UA/DM (the node isn't hearing us) and
+        a lost link are "failed"; giving up on our own DISC is "disconnected"
+        (we were tearing down anyway)."""
         if self.state in (State.CONNECTING, State.DISCONNECTING) and self._last_cmd:
             if self.retries >= _MAX_RETRIES:
+                # "failed" if we never established (connect gave up); but if we
+                # were tearing down, we're disconnected regardless.
+                event = "disconnected" if self.state is State.DISCONNECTING else "failed"
                 self.state = State.DISCONNECTED
-                return Result(events=["disconnected"])
+                return Result(events=[event])
             self.retries += 1
             return Result(send=[self._last_cmd])
         if self.state is State.CONNECTED and self._outstanding is not None:
             if self.retries >= _MAX_RETRIES:
                 self.state = State.DISCONNECTED
-                return Result(events=["disconnected"])
+                return Result(events=["failed"])
             self.retries += 1
             frame = build_frame(self.remote, self.local,
                                 Control(FrameKind.I, pf=True, ns=(self.vs - 1) % 8,
@@ -249,43 +268,68 @@ class Ax25Connection:
         return Result()
 
     def _on_dm(self) -> Result:
+        # A DM means the peer heard us but declined / can't accept (§4.3.3.5).
+        # "refused" (vs a silent timeout) tells the user the node IS hearing them.
         if self.state in (State.CONNECTING, State.CONNECTED, State.DISCONNECTING):
+            was_disconnecting = self.state is State.DISCONNECTING
             self.state = State.DISCONNECTED
-            return Result(events=["disconnected"])
+            return Result(events=["disconnected" if was_disconnecting else "refused"])
         return Result()
 
     def _on_iframe(self, c: Control, info: bytes) -> Result:
         if self.state is not State.CONNECTED:
             return Result()
+        res = Result()
+        # Every I frame's N(R) acknowledges our sent frames (AX.25 §6.4.6) —
+        # process the piggybacked ack BEFORE the sequence number, or a
+        # command+response exchange deadlocks (we'd resend an already-acked
+        # frame forever while the peer REJs it).
+        self._apply_ack(c.nr, res)
         if c.ns == self.vr:  # in-sequence
             self.vr = (self.vr + 1) % 8
-            rr = build_frame(self.remote, self.local,
-                             Control(FrameKind.RR, pf=c.pf, nr=self.vr),
-                             command=False, path=self.path)
-            return Result(send=[rr], deliver=[info])
-        # out of sequence: ask for the expected one
-        rej = build_frame(self.remote, self.local,
-                          Control(FrameKind.REJ, pf=c.pf, nr=self.vr),
-                          command=False, path=self.path)
-        return Result(send=[rej])
+            res.deliver.append(info)
+            # Defer the ack unless polled (P=1). Acking every frame of a burst
+            # would put us into TX after each one and, on this half-duplex link,
+            # make us miss the rest of the sender's window (§6.4.2). BPQ sets
+            # P=1 on the last frame of a window, so we ack the whole burst then.
+            if c.pf:
+                res.send.append(self._sframe(FrameKind.RR, self.vr, True))
+        else:  # out of sequence: ask for the one we expect
+            res.send.append(self._sframe(FrameKind.REJ, self.vr, c.pf))
+        return res
 
-    def _on_supervisory(self, c: Control) -> Result:
+    def _on_supervisory(self, c: Control, command: bool) -> Result:
         res = Result()
         if self.state is not State.CONNECTED:
             return res
-        if c.kind is FrameKind.REJ:
-            if self._outstanding is not None:
-                res.send.append(self._resend_iframe())
-            return res
-        # RR/RNR: c.nr acknowledges frames up to nr-1
-        if self._outstanding is not None and c.nr == self.vs:
+        # RR/RNR/REJ all acknowledge via N(R) first.
+        self._apply_ack(c.nr, res)
+        if c.kind is FrameKind.REJ and self._outstanding is not None:
+            # REJ asks us to retransmit anything still unacked.
+            res.send.append(self._resend_iframe())
+        elif c.pf and command:
+            # Answer a poll — a supervisory *command* with P=1 — with an RR
+            # response, F=1, carrying our current N(R) (§6.2). BPQ polls like
+            # this after a burst to confirm we received the whole window. A
+            # *response* with F=1 (the node acking us) must NOT be answered.
+            res.send.append(self._sframe(FrameKind.RR, self.vr, True))
+        return res
+
+    def _apply_ack(self, nr: int, res: Result) -> None:
+        """Acknowledge our outstanding I frame if N(R) covers it (window=1:
+        N(R) == V(S) means the peer has our last frame). Release the window
+        and send the next queued frame, if any."""
+        if self._outstanding is not None and nr == self.vs:
             self._outstanding = None
             self.retries = 0
             if self._pending:
                 res.send.append(self._send_iframe(self._pending.pop(0)))
-        return res
 
     # -- helpers --
+
+    def _sframe(self, kind: FrameKind, nr: int, pf: bool) -> bytes:
+        return build_frame(self.remote, self.local, Control(kind, pf=pf, nr=nr),
+                           command=False, path=self.path)
 
     def _u(self, kind: FrameKind, *, command: bool, pf: bool) -> bytes:
         return build_frame(self.remote, self.local, Control(kind, pf=pf),

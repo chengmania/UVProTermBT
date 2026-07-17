@@ -1,8 +1,9 @@
-from uvprotermbt.ax25 import Address
+from uvprotermbt.ax25 import Address, decode_frame
 from uvprotermbt.ax25_conn import (
     Ax25Connection,
     Control,
     FrameKind,
+    Result,
     State,
     build_frame,
     decode_control,
@@ -117,14 +118,25 @@ def test_disconnect_handshake():
 
 # ---- timers / retransmit ----
 
-def test_t1_retransmits_then_gives_up():
+def test_t1_retransmits_then_fails():
+    from uvprotermbt.ax25_conn import _MAX_RETRIES
     a = Ax25Connection(X, Y)
     a.connect()
-    for _ in range(3):  # N2 retries
+    for _ in range(_MAX_RETRIES):  # N2 retries
         r = a.on_timer()
         assert len(r.send) == 1 and a.state is State.CONNECTING
-    r = a.on_timer()  # exceeded -> give up
-    assert a.state is State.DISCONNECTED and "disconnected" in r.events
+    r = a.on_timer()  # exceeded -> give up; connect never established
+    assert a.state is State.DISCONNECTED and r.events == ["failed"]
+
+
+def test_dm_response_is_refused():
+    from uvprotermbt.ax25_conn import build_frame, Control, FrameKind
+    a = Ax25Connection(X, Y)
+    a.connect()  # -> CONNECTING
+    dm = build_frame(X, Y, Control(FrameKind.DM, pf=True), command=False)
+    r = a.on_receive(dm)
+    assert a.state is State.DISCONNECTED
+    assert r.events == ["refused"]  # node heard us and declined, not a timeout
 
 
 # ---- error recovery ----
@@ -142,5 +154,91 @@ def test_out_of_sequence_iframe_triggers_rej():
 
 
 def decode_control_kind(frame_bytes):
-    from uvprotermbt.ax25 import decode_frame
     return decode_control(decode_frame(frame_bytes).control).kind
+
+
+# ---- piggybacked-ack regression (the BBS command-response deadlock) ----
+
+def test_iframe_nr_acknowledges_our_outstanding():
+    # Reproduces the live BBS bug: after we send a command (frame 0), the node
+    # replies with its OWN I-frame whose N(R)=1 piggybacks the ack of our
+    # frame. We must clear our window and accept the reply, not resend frame 0.
+    from uvprotermbt.ax25_conn import build_frame, Control, FrameKind
+    a = Ax25Connection(X, Y)
+    a.state = State.CONNECTED
+    a.vr = 1  # already acked the node's welcome frame
+    a.send(b"?\r")  # our command -> ns=0, vs=1, outstanding set
+    assert a._outstanding == b"?\r" and a.vs == 1
+
+    node_reply = build_frame(X, Y, Control(FrameKind.I, pf=True, ns=1, nr=1),
+                             command=True, info=b"menu\r")
+    r = a.on_receive(node_reply)
+    assert a._outstanding is None          # piggybacked N(R)=1 acked frame 0
+    assert r.deliver == [b"menu\r"]        # reply delivered
+    assert a.vr == 2
+    ctrl = decode_control(decode_frame(r.send[0]).control)
+    assert ctrl.kind is FrameKind.RR and ctrl.nr == 2   # not a resend of "?"
+
+
+def test_rej_after_ack_does_not_resend():
+    from uvprotermbt.ax25_conn import build_frame, Control, FrameKind
+    a = Ax25Connection(X, Y)
+    a.state = State.CONNECTED
+    a.vr = 1
+    a.send(b"?\r")  # ns=0, vs=1, outstanding
+    a.on_receive(build_frame(X, Y, Control(FrameKind.RR, nr=1), command=False))
+    assert a._outstanding is None          # acked
+    rej = build_frame(X, Y, Control(FrameKind.REJ, pf=True, nr=1), command=False)
+    r = a.on_receive(rej)
+    assert r.send == []                    # nothing outstanding -> no resend
+
+
+# ---- half-duplex ack-storm regression (the "lm" message-list burst) ----
+
+def test_burst_defers_ack_until_polled():
+    # The node streams a window as I-frames P=0 ... P=0, last one P=1. We must
+    # deliver them all and send exactly ONE ack (at the poll), not one RR per
+    # frame — acking each would key TX mid-burst and lose the rest on the air.
+    from uvprotermbt.ax25_conn import build_frame, Control, FrameKind
+    a = Ax25Connection(X, Y)
+    a.state = State.CONNECTED
+    a.vr = 0
+    delivered, sent = [], []
+    burst = [(0, False), (1, False), (2, True)]  # last one polls
+    for i, (ns, pf) in enumerate(burst):
+        f = build_frame(X, Y, Control(FrameKind.I, pf=pf, ns=ns, nr=0),
+                        command=True, info=bytes([65 + i]))  # A, B, C
+        r = a.on_receive(f)
+        delivered += r.deliver
+        sent += r.send
+    assert delivered == [b"A", b"B", b"C"]     # every frame delivered
+    assert len(sent) == 1                       # only the poll got an ack
+    ctrl = decode_control(decode_frame(sent[0]).control)
+    assert ctrl.kind is FrameKind.RR and ctrl.nr == 3 and ctrl.pf is True
+
+
+def test_awaiting_response_drives_t1():
+    # The GUI arms/cancels its T1 from this; it must be True only while a reply
+    # is pending, so T1 is per-frame (never free-running -> no dup transmits).
+    a = Ax25Connection(X, Y)
+    assert a.awaiting_response is False          # disconnected
+    a.connect()
+    assert a.awaiting_response is True           # awaiting UA
+    a.state = State.CONNECTED
+    a._outstanding = None
+    assert a.awaiting_response is False          # connected, idle
+    a.send(b"cmd")
+    assert a.awaiting_response is True           # unacked I frame
+    a._apply_ack(a.vs, Result())                 # peer acks it
+    assert a.awaiting_response is False           # acked -> T1 cancelled
+
+
+def test_responds_to_supervisory_poll():
+    from uvprotermbt.ax25_conn import build_frame, Control, FrameKind
+    a = Ax25Connection(X, Y)
+    a.state = State.CONNECTED
+    a.vr = 3
+    poll = build_frame(X, Y, Control(FrameKind.RR, pf=True, nr=0), command=True)
+    r = a.on_receive(poll)
+    ctrl = decode_control(decode_frame(r.send[0]).control)
+    assert ctrl.kind is FrameKind.RR and ctrl.nr == 3 and ctrl.pf is True

@@ -341,3 +341,148 @@ UVProTermBT — Session Log
 - Fix: connected mode goes DIRECT by default; added `/connect NODE via
   D1,D2` for an explicit real digipeater/node path. Never uses the APRS
   path. Verified headlessly.
+
+2026-07-15 — AX.25 2.2 spec review + connected-mode diagnostics
+- Greg added the official AX.25 v2.2 spec (docs/AX25.2.2-Jul 98-2.pdf).
+  Reviewed it against ax25_conn.py. Findings:
+  - Our SABM encoding is correct (§6.1.2: command = dest C-bit 1 / source 0).
+  - The connect→T1→UA/DM flow (§6.3.1) and DISC teardown (§6.3.4) match ours.
+  - Two defaults were off-spec: N2 retries was 3 (spec default 10), T1 was
+    4000 ms (spec default 3000 ms). Fixed both.
+- **Key insight for the open BBS-connect bug:** §4.3.3.1/§6.3.1 — a node that
+  *receives* a SABM MUST answer UA (accept) or DM (refuse). Our frame is
+  byte-correct and direwolf hears it, yet the node is silent → it never
+  received it → RF/frequency, not our code. The app couldn't show this before
+  (DM and timeout both printed "disconnected").
+- Change: ax25_conn now emits distinct outcome events — `"refused"` on DM
+  (peer heard us, declined) vs `"failed"` on give-up after N2 (peer isn't
+  hearing us); `"disconnected"` still for clean DISC/UA. GUI shows different,
+  actionable BBS messages for each. N2→10, T1→3000 ms. `/bye` now aborts a
+  pending (not-yet-connected) session instead of leaving it to retry N2×T1.
+- Tests: test_ax25_conn.py updated (give-up now asserts "failed", N2=10) +
+  new test_dm_response_is_refused. Full suite 31/31. Verified the GUI
+  refused/failed/abort paths headlessly (offscreen).
+- docs/PROTOCOL.md §8 (new): AX.25 connected-mode notes — C-bit rule,
+  UA/DM-vs-silence diagnostic, spec defaults, SABME/FRMR version detection,
+  direct-connect (no APRS path) rule. Committed the spec PDF.
+- NEXT (Greg, at the radio): /connect KC3SMW-7 direct on the BBS frequency —
+  the app now reports "refused" (node heard you) vs "isn't hearing you",
+  which resolves yesterday's open question. Then: Mic-E lat/lon decode,
+  optional T3 keep-alive / v2.2 SABME negotiation, Winlink B2F.
+
+2026-07-15 — Bugfix: connected-mode I/S-frame N(R) acknowledgment (BBS deadlock)
+- Greg's TXDELAY fix (10ms→default on the UV-Pro) fixed the RF connect; the
+  app then connected and showed the node welcome. But sending a BBS command
+  deadlocked: the node acked our frame (RR n(r)=1, and piggybacked n(r)=1 in
+  its own reply I-frame) and sent its reply, yet our app kept resending frame
+  0 (n(s)=0) and the node kept REJ'ing (it wanted n(s)=1).
+- Root cause: `_on_iframe` processed only N(S) (sequencing), ignoring the
+  N(R) acknowledgment that every I and S frame carries (AX.25 §6.4.6). So a
+  piggybacked ack never cleared our outstanding frame, and REJ handling then
+  resent the already-acked frame forever.
+- Fix: shared `_apply_ack(nr)` called from I-frames, RR/RNR, and REJ, so any
+  N(R) that covers our outstanding frame releases the window (window=1) and
+  sends the next queued frame. REJ now acks first, then resends only if still
+  unacked. Added `_sframe()` helper.
+- Tests: test_iframe_nr_acknowledges_our_outstanding (crafted from the live
+  log) + test_rej_after_ack_does_not_resend. Full suite 33/33. Verified the
+  whole connect→welcome→command→reply flow end-to-end through the GUI headless.
+- NOTE (RF, Greg to watch): we clearly hear the node when idle (welcome/DISC)
+  but earlier logs suggest we may miss its immediate post-TX ack/reply — if
+  the exchange is still flaky after this fix, look at the UV-Pro's TX tail /
+  RX turnaround (same family as the TXDELAY that fixed connect).
+
+2026-07-15 — Bugfix: half-duplex ack storm on I-frame bursts + poll response
+- After the N(R)-ack fix, BBS sessions worked (connect, welcome, commands,
+  real BPQ content, "Hello Greg you have 1 messages"). But listing messages
+  ("lm") failed: the node streamed the list as a burst of I-frames (n(s)=3..0,
+  first five p=0, last p=1). Our app showed only the FIRST and then the node
+  polled RR n(r)=2 p=1 forever until it dropped us. Greg: "it buffers full and
+  fails."
+- Root cause (half-duplex ack storm): we sent an RR after EVERY received
+  I-frame. So we'd receive n(s)=3, immediately key TX to ack it, and go deaf
+  for the rest of the node's burst (n(s)=4..0) — losing them on the air.
+- Fixes (AX.25 §6.4.2 / §6.2):
+  - Defer acks: only send an RR for a received I-frame when it's polled
+    (P=1). BPQ sets P=1 on the last frame of a window, so we stay in RX for
+    the whole burst then ack it all with one RR. Out-of-sequence still REJs.
+  - Answer polls: a supervisory *command* with P=1 (the node's RR poll) now
+    gets an RR response with F=1 and our N(R). Must distinguish command vs
+    response — added `command` (dest C-bit) to Ax25Frame/decode_frame so we
+    never "answer" the node's own RR *responses* (that caused an RR loop; a
+    unit test caught it).
+- Tests: test_burst_defers_ack_until_polled + test_responds_to_supervisory_poll
+  (both crafted from the live log). Suite 35/35. Verified the full "lm"
+  burst + poll end-to-end through the GUI headless: all lines delivered, one
+  ack, poll answered.
+- NEXT (Greg): pull the branch and retry `lm` / longer BBS output on the air.
+
+2026-07-15 — Bugfix: pass slash-commands through to the BBS in a session
+- BBS sending works (Greg composed a message to NY3J). But the BBS ends a
+  message with "/ex", and our app ate it as a local slash-command ("unknown
+  command: /ex") — leaving him unable to close the message.
+- Fix (gui/main_window._send): while a terminal session is active, only our
+  session-control commands (/bye, /disconnect, /d, /theme) are local;
+  anything else starting with "/" (e.g. /ex) is sent to the remote as data.
+  When idle, all "/" input is local as before (/connect, /to, /theme).
+- Verified headlessly: /ex -> "/ex\r" to the BBS, normal text sends, /bye
+  still disconnects locally, /connect still works when idle. Suite 35/35.
+
+2026-07-15 — Bugfix: T1 was free-running, causing duplicate I-frames
+- Greg saw sessions degrade (frames sent twice, node REJ cascade, eventual
+  "not hearing you"). Log: every I-frame after the first went out twice.
+- Root cause: the GUI's T1 was a single REPEATING 3 s QTimer started once at
+  connect — not restarted per transmission. So it fired on its own phase; a
+  frame sent shortly before a tick got retransmitted before the ack arrived
+  → duplicate → node REJ → cascade. Intermittency (bbs single, lm+ double)
+  was pure timer phase. AX.25 §6.7.1.1: T1 starts when an I-frame is sent and
+  stops when acked.
+- Fix: T1 is now single-shot, (re)armed from a new
+  `Ax25Connection.awaiting_response` predicate after every connection event
+  (`_arm_t1`) — started while mid-handshake or an I-frame is outstanding,
+  cancelled the instant an ack clears it. Reordered `_bbs_connect` so the
+  timer exists before the connect result arms it.
+- Tests: test_awaiting_response_drives_t1 + headless GUI verification (T1
+  active on send, off on ack, stale fire doesn't retransmit, unacked fire
+  retransmits exactly once and re-arms). Suite 36/36.
+
+2026-07-15 — Resilience: T1 jitter + more retries; beacon/UV-Pro TX finding
+- FINDING (not our code): during a BBS session, the node's digipeated ID
+  beacon (KC3SMW-7>ID,W3SK: ...) congests the shared half-duplex channel and
+  the UV-Pro's KISS TNC then "refuses to send packets" — its transmit path
+  wedges. Verified by simulation that our app handles the beacon correctly
+  (it's a UI frame -> APRS monitor; the connected-mode session state and the
+  following ack are untouched). So this is a UV-Pro TNC / RF-contention issue,
+  not a protocol bug. Greg can't/won't change the node (it works with other
+  clients), so the fix on our end is resilience, not correctness.
+- Changes (AX.25 §6.3.6.1 collision recovery, §6.7.1.1):
+  - T1 retransmit now has random jitter (base 3 s + up to 2 s) so repeated
+    retries don't collide at the same phase during contention. Jitter lives
+    in the GUI's _arm_t1 (the state machine stays deterministic/testable).
+  - N2 15 (was 10) for extra patience so a burst of beacon/contention doesn't
+    drop the link before it clears.
+- Verified headlessly: T1 intervals spread across 3000-5000 ms, cancelled on
+  ack; N2=15. Suite 36/36 (the N2 give-up test reads _MAX_RETRIES).
+- Still limited by the UV-Pro's TX behavior under channel contention — if the
+  radio's KISS TX wedges, retries can't help. Worth noting for users: keep
+  the UV-Pro's own APRS beacon OFF while using it as a KISS TNC, and prefer a
+  quieter frequency for connected-mode/BBS work.
+
+2026-07-15 — Auto-recover a wedged KISS link (no app restart needed)
+- KEY finding from Greg: after the wedge, the radio only starts sending again
+  when he closes and REBOOTS THE PROGRAM — not the radio. UV-Pro's own beacon
+  is off. So the wedge is on OUR side: the RFCOMM link gets stuck (os.write()
+  keeps 'succeeding' but nothing reaches the radio, no error), and only a
+  fresh RFCOMM connection clears it. An app restart re-establishes that
+  connection; nothing else did.
+- Fix: `RfcommKissLink.reconnect()` — forces a fresh RFCOMM connection
+  (close fd + Disconnect/Connect -> new fd via the profile's NewConnection),
+  i.e. what an app restart does, but in-place. The GUI now calls it on a
+  session stall ("failed" event) so the wedge clears automatically; the user
+  just waits for ● BT and /connect again — no restart.
+- Verified headlessly (stall -> link.reconnect() invoked once, session
+  cleared, message shown). Suite 36/36.
+- CAVEAT: diagnosed from Greg's description, not direct observation of the
+  wedge. If reconnect() alone doesn't clear it on hardware, the stronger
+  version is to unregister+re-register the BlueZ profile (or bounce the whole
+  link thread) — closer to a full restart. Needs on-air confirmation.

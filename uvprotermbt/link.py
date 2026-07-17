@@ -183,6 +183,17 @@ class RfcommKissLink:
             # Teardown must run on the loop thread (touches D-Bus/GLib state).
             GLib.idle_add(self._handle_disconnect)
 
+    def reconnect(self) -> None:
+        """Force a fresh RFCOMM connection. Recovers a silently-wedged link —
+        where os.write() keeps 'succeeding' but the radio's KISS transmit has
+        stopped, with no error to detect — without needing an app restart
+        (which is otherwise the only way we've seen the wedge clear)."""
+        if self._loop is not None and not self._stop.is_set():
+            # Runs on the loop thread: close the fd and schedule a reconnect,
+            # which re-does Disconnect()/Connect() and gets a fresh fd via
+            # the profile's NewConnection — i.e. what an app restart does.
+            GLib.idle_add(self._handle_disconnect)
+
     def on_receive(self, callback: ReceiveCallback) -> None:
         self._on_receive = callback
 

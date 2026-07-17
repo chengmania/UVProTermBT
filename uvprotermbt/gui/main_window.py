@@ -13,6 +13,7 @@ updates are thread-safe.
 
 from __future__ import annotations
 
+import random
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -265,11 +266,31 @@ class MainWindow(QMainWindow):
         for ev in res.events:
             if ev == "connected":
                 self._sys(BBS, f"connected to {self._session.remote}")
+            elif ev == "refused":
+                # Peer sent a DM: it HEARD us and declined (AX.25 2.2 §4.3.3.5).
+                self._sys(BBS, "node refused the connection (DM) — it heard you "
+                               "but declined. Is it busy, or does it require a login?")
+                self._end_session()
+            elif ev == "failed":
+                # No UA/DM after N2 tries. On this radio the KISS transmit path
+                # can silently wedge under heavy channel traffic (frames stop
+                # going out with no error) and only a fresh RFCOMM connection
+                # clears it — so reset the link automatically instead of making
+                # the user restart the app.
+                self._sys(BBS, "no response after repeated tries — resetting the "
+                               "radio link (the KISS TNC can wedge under heavy "
+                               "traffic). Wait for ● BT, then /connect again.")
+                self._end_session()
+                self.link.reconnect()
             elif ev == "disconnected":
                 self._sys(BBS, "disconnected")
-                self._session = None
-                if self._t1 is not None:
-                    self._t1.stop()
+                self._end_session()
+        self._arm_t1()  # (re)start or cancel T1 based on whether we await a reply
+
+    def _end_session(self) -> None:
+        self._session = None
+        if self._t1 is not None:
+            self._t1.stop()
 
     def _bbs_out(self, text: str) -> None:
         for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -302,15 +323,23 @@ class MainWindow(QMainWindow):
         if self._tx_frame(aprs.encode_ack(src, to_call, msg_id, self.settings.path_list())):
             self._sys(CHAT, f"acked {to_call} message {msg_id}")
 
+    # Commands that stay local even inside a live terminal session. Anything
+    # else starting with "/" (e.g. a BBS's "/ex" to end a message) is sent to
+    # the remote instead of being treated as one of our commands.
+    _SESSION_LOCAL_CMDS = ("/bye", "/disconnect", "/d", "/theme")
+
     def _send(self) -> None:
         text = self._input.text().strip()
         self._input.clear()
         if not text:
             return
-        if text.startswith("/"):
-            self._command(text)
-            return
         mode = self._current_mode()
+        in_session = mode in (BBS, WINLINK) and self._session is not None
+        if text.startswith("/"):
+            if not in_session or text.split()[0].lower() in self._SESSION_LOCAL_CMDS:
+                self._command(text)
+                return
+            # else fall through: send the literal text (e.g. /ex) to the BBS
         if mode == CHAT:
             if not self._chat_target.strip():
                 self._sys(CHAT, "no target set — use /to CALL first")
@@ -370,12 +399,19 @@ class MainWindow(QMainWindow):
         self._session = ax25_conn.Ax25Connection(local, remote, path)
         where = f"{remote}" + (f" via {','.join(via)}" if via else " (direct)")
         self._sys(BBS, f"connecting to {where} …")
+        self._ensure_t1()  # create the timer before the result handler arms it
         self._handle_conn_result(self._session.connect())
-        self._ensure_t1()
 
     def _bbs_disconnect(self) -> None:
         if self._session is None:
             self._sys(self._current_mode(), "no active session")
+            return
+        # If we're still trying to connect (no UA yet), session.disconnect() is a
+        # no-op, so abort the pending attempt locally instead of leaving it to
+        # retry for N2×T1.
+        if self._session.state is not ax25_conn.State.CONNECTED:
+            self._sys(BBS, "aborted pending connect")
+            self._end_session()
             return
         self._handle_conn_result(self._session.disconnect())
 
@@ -390,8 +426,23 @@ class MainWindow(QMainWindow):
     def _ensure_t1(self) -> None:
         if self._t1 is None:
             self._t1 = QTimer(self)
+            self._t1.setSingleShot(True)  # (re)armed per transmission, not free-running
             self._t1.timeout.connect(self._on_t1)
-        self._t1.start(4000)
+
+    def _arm_t1(self) -> None:
+        """Start T1 (single-shot) while we're awaiting a response, else stop it.
+        Called after every connection event so T1 restarts on each transmission
+        and is cancelled the moment an ack arrives — never left free-running
+        (which retransmits prematurely and duplicates frames)."""
+        if self._t1 is None:
+            return
+        if self._session is not None and self._session.awaiting_response:
+            # T1 base ≈ 3 s (AX.25 2.2 §6.7.1.1) plus random jitter so repeated
+            # retransmits don't collide at the same phase on a busy/half-duplex
+            # channel (§6.3.6.1 collision recovery).
+            self._t1.start(random.randint(3000, 5000))
+        else:
+            self._t1.stop()
 
     def _on_t1(self) -> None:
         if self._session is not None:

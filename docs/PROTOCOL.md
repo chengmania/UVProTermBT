@@ -330,3 +330,36 @@ This is Phase 3 work — flagged here so it isn't a surprise.
 
 - Part 97: no content encryption on RF; ID with callsign (inherent in
   AX.25 source address); no third-party auto-forwarding shenanigans in v1.
+
+## 8. AX.25 Connected Mode (Terminal / BBS)
+
+Reference: the official **AX.25 v2.2 spec** is in `docs/AX25.2.2-Jul 98-2.pdf`
+(section numbers below cite it). Our implementation is `uvprotermbt/ax25_conn.py`
+(stop-and-wait, window k=1, modulo 8), wired to the GUI BBS/Winlink tabs.
+
+- **Command/response C-bits (§6.1.2):** a *command* frame sets the destination
+  SSID C-bit = 1 and the source SSID C-bit = 0; a response flips them. If BOTH
+  are 0 the peer assumes pre-2.0. Our SABM is a correct command
+  (`build_address_field(..., command=True)`), verified byte-for-byte.
+- **Connect handshake (§4.3.3.1, §6.3.1):** send SABM, start T1; the peer must
+  answer **UA** (accept) or **DM** (refuse). UA cancels T1 and zeroes V(S)/V(R).
+  No answer before T1 → resend SABM, up to **N2** times.
+- **KEY DIAGNOSTIC:** because a peer that *receives* a SABM must reply UA or DM,
+  **silence means the frame was never received** (wrong frequency / no RF path),
+  whereas a **DM means the node heard you and declined**. The app now
+  distinguishes these: a DM emits a `"refused"` event, a give-up after N2 emits
+  `"failed"` — the BBS tab shows different messages so you can tell which it is.
+  (This is what to check first when a `/connect` fails: refused vs not-heard.)
+- **Spec defaults (§6.3.2, §6.7):** T1 = **3000 ms**, N2 = **10**, window = 4
+  (v2.0) / 7 (v2.2), modulo 8, I-field ≤ 256 octets. We now use T1=3000/N2=10
+  (were 4000/3); window stays 1 (conservative, valid).
+- **Version detection (§4.3.3.2, §6.3.2):** a v2.2 station may try **SABME**
+  first; a pre-2.2 node replies **FRMR** (or DM), and the initiator falls back to
+  **SABM** (v2.0). Observed live: EasyTerm's log shows ChengmaniaBPQ FRMR the
+  SABME then accept the SABM — so the node is v2.0. We send SABM directly (no
+  SABME), which is correct for this node; SABME/v2.2 negotiation is a later
+  optional enhancement.
+- **Connect path:** connected mode goes **direct** by default. Do NOT use the
+  APRS path — `WIDE1-1/WIDE2-1` are APRS aliases that don't digipeat
+  connected-mode frames, so the SABM never completes its path and the node never
+  answers. Use `/connect <NODE> via <real-digi>` for an explicit hop.
