@@ -21,9 +21,11 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QIcon, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QPushButton,
-    QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+    QPushButton, QSplitter, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
+
+from .widgets import HistoryLineEdit
 
 ICON_PATH = Path(__file__).resolve().parent / "resources" / "icon.png"
 
@@ -128,18 +130,26 @@ class MainWindow(QMainWindow):
         sb.addWidget(self._sep1)
         self._bt_label = QLabel("○ BT")
         sb.addWidget(self._bt_label)
+        self._sep2 = QLabel("│")
+        sb.addWidget(self._sep2)
+        self._session_label = QLabel("BBS: —")
+        sb.addWidget(self._session_label)
         sb.addStretch()
         self._target_label = QLabel("")
         sb.addWidget(self._target_label)
         vbox.addWidget(self._status_bar)
 
-        # tabs with a chat/log view each
+        # tabs; each has a scrollback view. APRS additionally gets a
+        # heard-stations panel beside it.
         self._tabs = QTabWidget()
         for mode in MODES:
             view = QTextEdit()
             view.setReadOnly(True)
             self._views[mode] = view
-            self._tabs.addTab(view, mode)
+            if mode == MONITOR:
+                self._tabs.addTab(self._build_monitor_tab(view), mode)
+            else:
+                self._tabs.addTab(view, mode)
         vbox.addWidget(self._tabs, 1)
 
         # input bar
@@ -149,7 +159,7 @@ class MainWindow(QMainWindow):
         ib.setSpacing(6)
         self._prefix = QLabel(f"[{self.settings.mycall}]:")
         ib.addWidget(self._prefix)
-        self._input = QLineEdit()
+        self._input = HistoryLineEdit()
         self._input.setPlaceholderText(
             "Type a message and press Enter…   (/to CALL, /connect NODE, /theme)")
         self._input.returnPressed.connect(self._send)
@@ -161,6 +171,51 @@ class MainWindow(QMainWindow):
 
         self._update_target_label()
 
+    def _build_monitor_tab(self, view) -> QWidget:
+        """APRS tab = the scrollback view + a heard-stations panel."""
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.addWidget(view)
+        self._heard_list = QListWidget()
+        self._heard_list.setToolTip("Heard stations — double-click to set as chat target")
+        self._heard_list.itemDoubleClicked.connect(self._heard_clicked)
+        split.addWidget(self._heard_list)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 1)
+        split.setSizes([720, 250])
+        return split
+
+    def _heard_clicked(self, item) -> None:
+        call = item.data(Qt.ItemDataRole.UserRole)
+        if call:
+            self._chat_target = call
+            self._update_target_label()
+            self._tabs.setCurrentIndex(MODES.index(CHAT))
+            self._sys(CHAT, f"chat target set to {call} (from heard list)")
+
+    def _refresh_heard(self) -> None:
+        import time
+        now = time.time()
+        self._heard_list.clear()
+        for h in self._heard.recent()[:100]:
+            age = int(now - h.last)
+            ago = f"{age}s" if age < 60 else f"{age // 60}m"
+            item = QListWidgetItem(f"{h.call}   {h.last_kind.value}   {ago} ×{h.count}")
+            item.setData(Qt.ItemDataRole.UserRole, h.call)
+            self._heard_list.addItem(item)
+
+    def _refresh_session_badge(self) -> None:
+        p = self._pal
+        if self._session is None:
+            self._session_label.setText("BBS: —")
+            color = p.text
+        elif self._session.state is ax25_conn.State.CONNECTED:
+            self._session_label.setText(f"BBS: ● {self._session.remote}")
+            color = p.green
+        else:
+            self._session_label.setText(f"BBS: {self._session.state.value}…")
+            color = p.yellow
+        self._session_label.setStyleSheet(f"color:{color}; font-weight:bold;")
+
     # ---- theme ----------------------------------------------------------
 
     def _apply_theme(self) -> None:
@@ -171,13 +226,18 @@ class MainWindow(QMainWindow):
         self._cs_label.setStyleSheet(
             f"color:{p.accent}; font-weight:bold; font-size:14px;")
         self._sep1.setStyleSheet(f"color:{p.border};")
+        self._sep2.setStyleSheet(f"color:{p.border};")
         self._prefix.setStyleSheet(f"color:{p.accent}; font-weight:bold;")
         self._target_label.setStyleSheet(f"color:{p.text};")
+        self._heard_list.setStyleSheet(
+            f"background:{p.panel}; border:1px solid {p.border};"
+            f"border-radius:4px; color:{p.text};")
         for view in self._views.values():
             view.setStyleSheet(
                 f"background:{p.panel}; border:1px solid {p.border};"
                 f"border-radius:4px; color:{p.text};")
         self._refresh_bt_label()
+        self._refresh_session_badge()
         self._rerender_all()
 
     def _toggle_theme(self) -> None:
@@ -250,6 +310,7 @@ class MainWindow(QMainWindow):
 
     def _route_aprs(self, pkt: aprs.AprsPacket) -> None:
         self._heard.note(pkt)
+        self._refresh_heard()
         self._record(MONITOR, ("mon", _ts(), pkt.source, pkt.kind.value, pkt.summary()))
         if pkt.kind is aprs.Kind.MESSAGE:
             self._rx(CHAT, pkt.source, pkt.text)
@@ -295,6 +356,7 @@ class MainWindow(QMainWindow):
                 self._sys(BBS, "disconnected")
                 self._end_session()
         self._arm_t1()  # (re)start or cancel T1 based on whether we await a reply
+        self._refresh_session_badge()
 
     def _end_session(self) -> None:
         self._session = None
@@ -347,6 +409,7 @@ class MainWindow(QMainWindow):
         self._input.clear()
         if not text:
             return
+        self._input.remember(text)  # Up/Down history recall
         mode = self._current_mode()
         in_session = mode in (BBS, WINLINK) and self._session is not None
         if text.startswith("/"):

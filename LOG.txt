@@ -507,3 +507,14 @@ UVProTermBT — Session Log
 - Verified headlessly: unconfigured -> TX blocked + "not configured" shown +
   link not started; configured -> TX gate passes; all dialogs construct;
   wizard renders correctly. Suite 36/36.
+
+2026-07-16 — Phase A: UI improvements (history, heard panel, session badge)
+- gui/widgets.py HistoryLineEdit: Up/Down command-history recall (shell-like)
+  on the input line; main_window remembers each submitted line.
+- APRS tab is now a splitter: monitor scrollback + a heard-stations panel
+  (call, last kind, age, count), fed from aprs.HeardTable on every RX.
+  Double-click a station -> sets it as the chat target and jumps to Chat.
+- Status bar gains a BBS session badge: "BBS: —" / "connecting…" / "● <node>"
+  (green when connected), refreshed on every connection event and theme change.
+- Verified headlessly (history recall cycles; heard list populates + click
+  sets target; badge idle/connecting/connected) and rendered. Suite 36/36.
