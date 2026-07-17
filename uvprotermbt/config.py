@@ -18,11 +18,17 @@ def _config_path() -> Path:
     return Path(base) / "uvprotermbt" / "config.json"
 
 
+# Neutral out-of-the-box defaults: a fresh install must NOT transmit as someone
+# else's callsign or try to reach a hard-coded radio. The first-run wizard
+# collects the real values; is_configured() gates transmit.
+DEFAULT_CALLSIGN = "N0CALL"
+
+
 @dataclass
 class Settings:
-    callsign: str = "KC3SMW"
-    ssid: int = 7  # -7 handheld convention
-    bt_mac: str = "38:D2:00:01:38:8F"
+    callsign: str = DEFAULT_CALLSIGN
+    ssid: int = 0
+    bt_mac: str = ""  # user's radio MAC — picked in the first-run wizard
     aprs_path: str = "WIDE1-1,WIDE2-1"
     theme: str = "dark"  # "dark" | "light"
     beacon: bool = False
@@ -30,6 +36,12 @@ class Settings:
     @property
     def mycall(self) -> str:
         return f"{self.callsign}-{self.ssid}"
+
+    def is_configured(self) -> bool:
+        """True once the user has set a real callsign and a radio MAC. Until
+        then the app must not transmit (Part 97: no TX without your callsign)."""
+        return (self.callsign not in ("", DEFAULT_CALLSIGN)
+                and bool(self.bt_mac.strip()))
 
     def path_list(self) -> list[tuple[str, int]]:
         """Parse aprs_path 'WIDE1-1,WIDE2-1' into [(call, ssid), ...]."""

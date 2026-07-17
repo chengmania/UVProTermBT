@@ -68,6 +68,11 @@ class MainWindow(QMainWindow):
         self._sys(BBS, "BBS terminal — /connect <NODE> (direct) or /connect <NODE> via <D1,D2>; /bye to disconnect")
         self._sys(WINLINK, "Winlink — AX.25 connect works (/connect <RMS>); the B2F/Winlink protocol layer is still TODO")
 
+        if not settings.is_configured():
+            self._sys(CHAT, "not configured — set your callsign and radio in "
+                            "File → Settings (or Radio → Select Radio). "
+                            "Transmit is disabled until then.")
+
         self._start_link()
 
     # ---- UI construction ------------------------------------------------
@@ -84,6 +89,10 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction("E&xit", self.close)
         mb.addMenu(file_menu)
+        radio_menu = QMenu("&Radio", self)
+        radio_menu.addAction("&Select Radio…", self._select_radio)
+        radio_menu.addAction("Re&connect Link", self._reconnect_link)
+        mb.addMenu(radio_menu)
         view_menu = QMenu("&View", self)
         act = QAction("Toggle &Theme (dark/light)", self)
         act.setShortcut("Ctrl+T")
@@ -303,6 +312,11 @@ class MainWindow(QMainWindow):
         return MODES[self._tabs.currentIndex()]
 
     def _tx_frame(self, frame_bytes: bytes) -> bool:
+        if not self.settings.is_configured():
+            self._sys(self._current_mode(),
+                      "set your callsign and radio first (File → Settings). "
+                      "Transmit is disabled until then.")
+            return False
         if not self.link.is_connected():
             self._sys(self._current_mode(), "not connected to the radio — cannot transmit")
             return False
@@ -383,6 +397,9 @@ class MainWindow(QMainWindow):
         return Address(call.upper(), int(ssid or 0))
 
     def _bbs_connect(self, node: str, via: list[str] | None = None) -> None:
+        if not self.settings.is_configured():
+            self._sys(BBS, "set your callsign and radio first (File → Settings).")
+            return
         if not self.link.is_connected():
             self._sys(BBS, "not connected to the radio — cannot start a session")
             return
@@ -454,7 +471,9 @@ class MainWindow(QMainWindow):
     # ---- link lifecycle / status ----------------------------------------
 
     def _start_link(self) -> None:
-        if dbus_available():
+        if not self.settings.bt_mac.strip():
+            self._sys(CHAT, "no radio set — Radio → Select Radio to choose one.")
+        elif dbus_available():
             try:
                 self.link.begin()
             except Exception as exc:  # pragma: no cover
@@ -482,6 +501,7 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self) -> None:
         from .settings_dialog import SettingsDialog
+        old_mac = self.settings.bt_mac
         dlg = SettingsDialog(self.settings, parent=self)
         if dlg.exec():
             self.settings.save()
@@ -489,6 +509,40 @@ class MainWindow(QMainWindow):
             self._prefix.setText(f"[{self.settings.mycall}]:")
             self.setWindowTitle(f"UVProTermBT — {self.settings.mycall}")
             self._sys(self._current_mode(), "settings saved")
+            if self.settings.bt_mac != old_mac:
+                self._rebuild_link()
+
+    def _select_radio(self) -> None:
+        from .radio_picker import RadioPicker
+        dlg = RadioPicker(self.settings.bt_mac, parent=self)
+        if dlg.exec() and dlg.selected_mac():
+            self.settings.bt_mac = dlg.selected_mac()
+            self.settings.save()
+            self._sys(self._current_mode(), f"radio set to {self.settings.bt_mac}")
+            self._rebuild_link()
+
+    def _reconnect_link(self) -> None:
+        if not self.settings.bt_mac.strip():
+            self._sys(self._current_mode(), "no radio set — Radio → Select Radio.")
+            return
+        self._sys(self._current_mode(), "reconnecting link…")
+        self._rebuild_link()
+
+    def _rebuild_link(self) -> None:
+        """Tear down the link and start a fresh one for the current MAC — used
+        after the radio changes or on a manual Reconnect."""
+        try:
+            self.link.stop()
+        except Exception:
+            pass
+        self.link = RfcommKissLink(self.settings.bt_mac)
+        self.link.on_receive(self._on_rx_bytes)
+        if self.settings.bt_mac.strip() and dbus_available():
+            try:
+                self.link.begin()
+                self._sys(self._current_mode(), f"connecting to {self.settings.bt_mac} …")
+            except Exception as exc:  # pragma: no cover
+                self._sys(self._current_mode(), f"link error: {exc}")
 
     def _open_about(self) -> None:
         from PyQt6.QtWidgets import QMessageBox

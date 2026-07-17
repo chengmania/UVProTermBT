@@ -486,3 +486,24 @@ UVProTermBT — Session Log
   wedge. If reconnect() alone doesn't clear it on hardware, the stronger
   version is to unregister+re-register the BlueZ profile (or bounce the whole
   link thread) — closer to a full restart. Needs on-air confirmation.
+
+2026-07-16 — Phase B: first-run setup + safe defaults (shareable build)
+- Problem: defaults shipped Greg's callsign (KC3SMW-7) and radio MAC, so a
+  fresh install would transmit as someone else's call (Part 97 problem) with
+  no way to find the user's own radio.
+- config.py: neutral defaults (callsign N0CALL, ssid 0, empty bt_mac) +
+  is_configured() — true only with a real callsign AND a radio MAC. Transmit
+  is gated on it.
+- bt.py: BlueZ D-Bus device discovery (list known devices fast; optional
+  StartDiscovery). Radios (UV-PRO/VR-N/…) sort first. Verified it finds the
+  paired UV-Pro.
+- gui/radio_picker.py: RadioPicker dialog (scan off the UI thread, pick a
+  device). gui/setup_wizard.py: first-run wizard (callsign + radio + the
+  Enable-KISS-TNC/pairing checklist). settings_dialog gains a "Select…"
+  button; __main__ runs the wizard when unconfigured.
+- main_window: Radio menu (Select Radio…, Reconnect Link); TX and /connect
+  gated on is_configured(); link not started without a MAC; changing the
+  radio rebuilds the link (_rebuild_link).
+- Verified headlessly: unconfigured -> TX blocked + "not configured" shown +
+  link not started; configured -> TX gate passes; all dialogs construct;
+  wizard renders correctly. Suite 36/36.
