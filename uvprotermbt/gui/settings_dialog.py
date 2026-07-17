@@ -44,6 +44,10 @@ class SettingsDialog(QDialog):
         self._path = QLineEdit(settings.aprs_path)
         form.addRow("APRS path", self._path)
 
+        self._winlink = QLineEdit(settings.winlink_call)
+        self._winlink.setPlaceholderText(f"blank = {settings.mycall} (Winlink often uses -10)")
+        form.addRow("Winlink callsign", self._winlink)
+
         self._theme = QComboBox()
         self._theme.addItems(["dark", "light"])
         self._theme.setCurrentText(settings.theme)
@@ -65,5 +69,6 @@ class SettingsDialog(QDialog):
         self.settings.ssid = self._ssid.value()
         self.settings.bt_mac = self._mac.text().strip()
         self.settings.aprs_path = self._path.text().strip()
+        self.settings.winlink_call = self._winlink.text().strip().upper()
         self.settings.theme = self._theme.currentText()
         self.accept()

@@ -32,10 +32,17 @@ class Settings:
     aprs_path: str = "WIDE1-1,WIDE2-1"
     theme: str = "dark"  # "dark" | "light"
     beacon: bool = False
+    winlink_call: str = ""  # Winlink often uses a distinct SSID (e.g. -10)
 
     @property
     def mycall(self) -> str:
         return f"{self.callsign}-{self.ssid}"
+
+    @property
+    def winlink_callsign(self) -> str:
+        """Callsign used for the Winlink AX.25 port. Defaults to mycall; set
+        winlink_call to use a different SSID (Winlink users commonly use -10)."""
+        return self.winlink_call.strip().upper() or self.mycall
 
     def is_configured(self) -> bool:
         """True once the user has set a real callsign and a radio MAC. Until

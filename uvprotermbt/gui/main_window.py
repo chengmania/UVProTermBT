@@ -18,7 +18,7 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QProcess, QTimer
 from PyQt6.QtGui import QAction, QIcon, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMenu,
@@ -55,9 +55,9 @@ class MainWindow(QMainWindow):
         self._msg_seq = 0
         self._session: ax25_conn.Ax25Connection | None = None  # BBS/terminal
         self._t1 = None
-        self._bridge = None            # KissTcpServer for PAT/Winlink
+        self._bridge = None            # PtyBridge for PAT/Winlink
         self._bridge_active = False
-        self._bridge_client = False    # last-seen PAT-connected state
+        self._helper_proc = None       # pkexec QProcess (kissattach/install/detach)
         # per-tab message records, so a theme switch can re-render with new colors
         self._records: dict[str, list[tuple]] = {m: [] for m in MODES}
         self._views: dict[str, QTextEdit] = {}
@@ -71,8 +71,9 @@ class MainWindow(QMainWindow):
         self._sys(CHAT, f"UVProTermBT — {settings.mycall}  |  chat target: {self._chat_target}")
         self._sys(MONITOR, "APRS monitor — decoded traffic from the UV-Pro appears here")
         self._sys(BBS, "BBS terminal — /connect <NODE> (direct) or /connect <NODE> via <D1,D2>; /bye to disconnect")
-        self._sys(WINLINK, "Winlink — click Start Winlink Bridge, then point PAT "
-                           "(pat-gensio) at kiss,tcp,localhost:8001. PAT does the "
+        self._sys(WINLINK, "Winlink — click Start Winlink Bridge (installs the AX.25 "
+                           "tools + runs kissattach for you, with a password prompt), then "
+                           "in PAT use AX.25 engine 'linux', axport 'wl2k'. PAT does the "
                            "Winlink B2F; this app just bridges the radio.")
 
         if not settings.is_configured():
@@ -566,10 +567,12 @@ class MainWindow(QMainWindow):
     def _update_target_label(self) -> None:
         self._target_label.setText(f"chat target: {self._chat_target}")
 
-    # ---- Winlink (KISS-over-TCP bridge for PAT) --------------------------
+    # ---- Winlink (pty + kissattach -> kernel AX.25 -> PAT ax25+linux) -----
+
+    _AXPORT = "wl2k"  # /etc/ax25/axports port name
 
     def _toggle_bridge(self) -> None:
-        if self._bridge is not None and self._bridge.is_running():
+        if self._bridge_active:
             self._stop_bridge()
         else:
             self._start_bridge()
@@ -581,42 +584,91 @@ class MainWindow(QMainWindow):
         if not self.link.is_connected():
             self._sys(WINLINK, "connect the radio first — wait for ● BT.")
             return
-        if self._bridge is None:
-            from ..kiss_tcp import KissTcpServer
-            self._bridge = KissTcpServer(self.link)
+        import shutil
+        if shutil.which("kissattach") is None:
+            from PyQt6.QtWidgets import QMessageBox
+            r = QMessageBox.question(
+                self, "Install AX.25 tools?",
+                "Winlink needs the Linux AX.25 tools (ax25-tools, ~1 MB).\n\n"
+                "Install them now? You'll be asked for your password.")
+            if r != QMessageBox.StandardButton.Yes:
+                return
+            self._sys(WINLINK, "installing AX.25 tools …")
+            self._run_helper(["install"], self._after_install)
+            return
+        self._do_attach()
+
+    def _after_install(self, ok: bool) -> None:
+        import shutil
+        if ok and shutil.which("kissattach") is not None:
+            self._sys(WINLINK, "AX.25 tools installed.")
+            self._do_attach()
+        else:
+            self._sys(WINLINK, "install failed or was cancelled.")
+
+    def _do_attach(self) -> None:
+        from ..pty_bridge import PtyBridge
+        self._bridge = PtyBridge(self.link)
         try:
-            self._bridge.start()
+            pty = self._bridge.start()
         except OSError as e:
-            self._sys(WINLINK, f"couldn't open the bridge port {self._bridge.port}: {e} "
-                               "(is another bridge or program already using it?)")
+            self._sys(WINLINK, f"couldn't create the pty: {e}")
+            self._bridge = None
+            return
+        self._bridge_btn.setEnabled(False)
+        call = self.settings.winlink_callsign
+        self._sys(WINLINK, f"attaching kernel AX.25 to {pty} (port {self._AXPORT}, {call}) …")
+        self._run_helper(["attach", pty, self._AXPORT, call], self._after_attach)
+
+    def _after_attach(self, ok: bool) -> None:
+        self._bridge_btn.setEnabled(True)
+        if not ok:
+            self._sys(WINLINK, "kissattach failed (cancelled, or the radio's KISS TNC "
+                               "isn't up). Bridge not started.")
+            if self._bridge is not None:
+                self._bridge.stop()
+                self._bridge = None
             return
         self._bridge_active = True
-        self._bridge_client = False
         self._bridge_btn.setText("Stop Winlink Bridge")
-        cfg = f"kiss,tcp,{self._bridge.host},{self._bridge.port}"
-        self._bridge_info.setText(f"PAT: {cfg}")
-        self._sys(WINLINK, f"bridge listening on {self._bridge.host}:{self._bridge.port}. "
-                           f"In PAT (pat-gensio) set the connect gensio to  {cfg}  and "
-                           "connect to your RMS. While the bridge runs, PAT drives the "
-                           "radio and this app's transmit is paused.")
+        self._bridge_info.setText(f"PAT: engine=linux, axport={self._AXPORT}")
+        self._sys(WINLINK, f"kernel AX.25 up (port {self._AXPORT}, callsign "
+                           f"{self.settings.winlink_callsign}). In PAT set AX.25 engine "
+                           f"'linux' + axport '{self._AXPORT}', then connect: "
+                           f"ax25+linux://{self._AXPORT}/<RMS>. While the bridge runs PAT "
+                           "drives the radio and this app's transmit is paused.")
 
     def _stop_bridge(self) -> None:
+        self._run_helper(["detach", self._AXPORT], None)
         if self._bridge is not None:
             self._bridge.stop()
+            self._bridge = None
         self._bridge_active = False
-        self._bridge_client = False
         self._bridge_btn.setText("Start Winlink Bridge")
         self._bridge_info.setText("")
         self._sys(WINLINK, "bridge stopped — this app can transmit again.")
 
-    def _poll_bridge(self) -> None:
-        if not self._bridge_active or self._bridge is None:
-            return
-        now = self._bridge.client_connected()
-        if now != self._bridge_client:
-            self._bridge_client = now
-            self._sys(WINLINK, "PAT connected — driving the radio" if now
-                      else "PAT disconnected")
+    def _run_helper(self, args, on_done) -> None:
+        """Run the privileged helper via pkexec (GUI password prompt), off the
+        UI thread. on_done(ok: bool) fires when it finishes (or None)."""
+        from pathlib import Path
+        helper = str(Path(__file__).resolve().parents[2] / "scripts" / "winlink-helper.sh")
+        proc = QProcess(self)
+        self._helper_proc = proc  # keep a reference alive
+
+        def finished(code, _status):
+            out = bytes(proc.readAllStandardOutput()).decode("utf-8", "replace")
+            err = bytes(proc.readAllStandardError()).decode("utf-8", "replace")
+            for line in (out + err).splitlines():
+                if line.strip():
+                    self._sys(WINLINK, f"  {line.strip()}")
+            if on_done is not None:
+                on_done(code == 0)
+
+        proc.finished.connect(finished)
+        proc.errorOccurred.connect(
+            lambda _e: self._sys(WINLINK, "could not launch pkexec (is policykit installed?)"))
+        proc.start("pkexec", [helper] + list(args))
 
     # ---- link lifecycle / status ----------------------------------------
 
@@ -641,7 +693,6 @@ class MainWindow(QMainWindow):
     def _poll(self) -> None:
         self.link.poll()
         self._refresh_bt_label()
-        self._poll_bridge()
 
     def _refresh_bt_label(self) -> None:
         p = self._pal
@@ -712,6 +763,15 @@ class MainWindow(QMainWindow):
             self.settings.save()
         except Exception:
             pass
+        if self._bridge_active:
+            # bring the kernel AX.25 port down (best-effort, synchronous)
+            import subprocess
+            from pathlib import Path
+            helper = str(Path(__file__).resolve().parents[2] / "scripts" / "winlink-helper.sh")
+            try:
+                subprocess.run(["pkexec", helper, "detach", self._AXPORT], timeout=15)
+            except Exception:
+                pass
         if self._bridge is not None:
             self._bridge.stop()
         self.link.stop()

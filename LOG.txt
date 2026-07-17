@@ -564,3 +564,30 @@ UVProTermBT — Session Log
   docs/WINLINK_PAT.md: PAT/pat-gensio setup guide.
 - NEXT (Greg, on-air): install pat-gensio, Start Winlink Bridge, point PAT at
   kiss,tcp,localhost:8001, connect to an RMS, send/receive a Winlink message.
+
+2026-07-17 — Phase C.2: one-click "Setup & Go" Winlink (automate kissattach)
+- The proven Winlink path (socat pty → sudo kissattach → kernel AX.25 → PAT
+  ax25+linux) wasn't load-and-go. Automated it end-to-end from the app.
+- tncattach ruled out for Winlink (makes TUN/TAP IP interfaces, not AX.25; an
+  RMS can't talk to it). Its -T --kisstcp mode → our KISS-TCP bridge stays a
+  future IP/Reticulum option.
+- uvprotermbt/pty_bridge.py (new): PtyBridge — native pty (os.openpty), no
+  socat. Relays the pty MASTER ↔ radio; kissattach sets N_AX25 on the SLAVE, so
+  our master relay is exactly the KISS-TNC interface the kernel wants. Holds the
+  slave fd to avoid EIO before kissattach opens it. tests/test_pty_bridge.py (2).
+- scripts/winlink-helper.sh (new): privileged helper run via pkexec (GUI
+  password). Subcommands install (apt ax25-tools/libax25), attach (modprobe,
+  sync one axports line, kissattach + kissparms), detach (kill kissattach +
+  ip link down). Strict arg validation + safe PATH (runs as root).
+- main_window Winlink tab: Start Winlink Bridge → (first time) offers install →
+  pty → pkexec attach → shows PAT config (engine linux, axport wl2k). pkexec via
+  QProcess (async, off the UI thread). _bridge_active still pauses app TX.
+  closeEvent detaches. config.py: winlink_call (+ winlink_callsign property,
+  default mycall); Settings dialog field (Winlink often uses -10).
+- docs/WINLINK_PAT.md rewritten around the one-click flow; kiss_tcp.py kept +
+  documented for pat-gensio/tncattach. Feasibility confirmed on-box (pkexec +
+  polkit-kde agent running, ax25-tools in apt). Suite 41/41; GUI flow verified
+  headlessly (pkexec mocked) + rendered.
+- NEEDS ON-AIR (Greg): fresh box → Start Winlink Bridge → install prompt →
+  password → kissattach up → PAT ax25+linux://wl2k/RMS → pull messages, no
+  manual socat/kissattach. Verify kissattach returns (doesn't block QProcess).
