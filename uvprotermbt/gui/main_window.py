@@ -22,7 +22,8 @@ from PyQt6.QtCore import Qt, QProcess, QTimer
 from PyQt6.QtGui import QAction, QIcon, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMenu,
-    QPushButton, QSplitter, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QPushButton, QSplitter, QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout,
+    QWidget,
 )
 
 from .widgets import HistoryLineEdit
@@ -58,6 +59,7 @@ class MainWindow(QMainWindow):
         self._bridge = None            # PtyBridge for PAT/Winlink
         self._bridge_active = False
         self._helper_proc = None       # pkexec QProcess (kissattach/install/detach)
+        self._pat_panel = None         # embedded PAT web UI (built in _build_winlink_tab)
         # per-tab message records, so a theme switch can re-render with new colors
         self._records: dict[str, list[tuple]] = {m: [] for m in MODES}
         self._views: dict[str, QTextEdit] = {}
@@ -180,8 +182,11 @@ class MainWindow(QMainWindow):
         self._update_target_label()
 
     def _build_winlink_tab(self, view) -> QWidget:
-        """Winlink tab = a bridge toolbar (start/stop the KISS-over-TCP server
-        for PAT) above the log view."""
+        """Winlink tab = a bridge toolbar (start/stop kissattach + PAT) above a
+        stack that swaps between the log/instructions and the embedded PAT web
+        UI once the bridge is up."""
+        from .pat_panel import PatPanel
+
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
@@ -195,7 +200,14 @@ class MainWindow(QMainWindow):
         self._bridge_info = QLabel("")
         h.addWidget(self._bridge_info, 1)
         v.addWidget(bar)
-        v.addWidget(view, 1)
+
+        # index 0 = log/instructions (shown until the bridge is up),
+        # index 1 = embedded PAT web UI (shown while Winlink is running).
+        self._winlink_stack = QStackedWidget()
+        self._winlink_stack.addWidget(view)
+        self._pat_panel = PatPanel()
+        self._winlink_stack.addWidget(self._pat_panel)
+        v.addWidget(self._winlink_stack, 1)
         return w
 
     def _build_monitor_tab(self, view) -> QWidget:
@@ -631,14 +643,25 @@ class MainWindow(QMainWindow):
             return
         self._bridge_active = True
         self._bridge_btn.setText("Stop Winlink Bridge")
-        self._bridge_info.setText(f"PAT: engine=linux, axport={self._AXPORT}")
         self._sys(WINLINK, f"kernel AX.25 up (port {self._AXPORT}, callsign "
-                           f"{self.settings.winlink_callsign}). In PAT set AX.25 engine "
-                           f"'linux' + axport '{self._AXPORT}', then connect: "
-                           f"ax25+linux://{self._AXPORT}/<RMS>. While the bridge runs PAT "
-                           "drives the radio and this app's transmit is paused.")
+                           f"{self.settings.winlink_callsign}). Starting PAT — in its "
+                           f"Connect dialog pick AX.25 (linux), axport '{self._AXPORT}', "
+                           f"then connect ax25+linux://{self._AXPORT}/<RMS>. While the "
+                           "bridge runs PAT drives the radio and this app's TX is paused.")
+        # Launch PAT and show its web UI inside the tab.
+        from .pat_panel import WEBENGINE_AVAILABLE
+        started = self._pat_panel.start_pat_http(lambda m: self._sys(WINLINK, m))
+        if started and WEBENGINE_AVAILABLE:
+            self._winlink_stack.setCurrentWidget(self._pat_panel)
+            self._bridge_info.setText(f"Winlink ready — PAT running below (axport {self._AXPORT})")
+        elif started:
+            self._bridge_info.setText(f"Winlink ready — PAT opened in your browser (axport {self._AXPORT})")
+        else:
+            self._bridge_info.setText(f"PAT: engine=linux, axport={self._AXPORT}")
 
     def _stop_bridge(self) -> None:
+        self._pat_panel.stop_pat_http()
+        self._winlink_stack.setCurrentIndex(0)
         self._run_helper(["detach", self._AXPORT], None)
         if self._bridge is not None:
             self._bridge.stop()
@@ -763,6 +786,8 @@ class MainWindow(QMainWindow):
             self.settings.save()
         except Exception:
             pass
+        if self._pat_panel is not None:
+            self._pat_panel.stop_pat_http()
         if self._bridge_active:
             # bring the kernel AX.25 port down (best-effort, synchronous)
             import subprocess

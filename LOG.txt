@@ -1,6 +1,41 @@
 UVProTermBT — Session Log
 =========================
 
+2026-07-17 — Phase C.3: embed the PAT Winlink web UI in-window
+- Before: the Winlink tab only did the bridge half (kissattach) and told the user
+  to leave the app and run PAT in a terminal. Now PAT's own web UI (compose/read/
+  connect/mailbox) renders INSIDE the Winlink tab via QWebEngineView — one button
+  does everything.
+- uvprotermbt/gui/pat_panel.py (new): PatPanel — guarded WebEngine import
+  (WEBENGINE_AVAILABLE); launches `pat http` via QProcess and loads its page;
+  stop_pat_http terminates it (idempotent). Reads ONLY `http_addr` from PAT's
+  config (default localhost:8080) — never secure_login_password. If WebEngine is
+  absent, shows a placeholder + opens PAT in the system browser (graceful
+  fallback).
+- main_window.py: Winlink tab now has a QStackedWidget (log/instructions <-> the
+  embedded PatPanel). _after_attach launches PAT + swaps to the web view (or
+  browser fallback); _stop_bridge stops PAT + swaps back; closeEvent stops PAT.
+  Reused _run_helper/_bridge_active/kissattach flow unchanged.
+- requirements.txt: added PyQt6-WebEngine (pip, version-matches pip PyQt6; the apt
+  build would ABI-clash). ~100 MB Chromium wheel; app degrades gracefully if
+  absent.
+- __main__.py: _ensure_qt_lib_path() shim — when PyQt6 and PyQt6-WebEngine land in
+  different site-packages roots (--system-site-packages venv over a pre-existing
+  user PyQt6), WebEngine's libs (libQt6WebChannel.so.6 etc.) aren't found via the
+  wheel RPATH and the import fails. Shim puts PyQt6's Qt6/lib on LD_LIBRARY_PATH
+  and re-execs once (scoped to only fire when WebEngine is installed; no-op under
+  PyInstaller). Verified: fresh `python -m uvprotermbt` re-execs, WebEngine loads,
+  app connects to the radio (fd up), no traceback.
+- tests/test_pat_panel.py (new, 6): http_addr URL parsing incl. ':8080'->localhost
+  and missing-config default, and that the password sentinel never reaches the
+  URL; panel builds; start_pat_http guards on missing PAT; argv == ('pat',
+  ['http']); idempotent stop. QProcess faked, no real spawn. Suite 50/50.
+- docs/WINLINK_PAT.md rewritten around the embedded flow + the WebEngine
+  dependency/fallback + the LD_LIBRARY_PATH auto-fix note.
+- NEEDS ON-AIR (Greg): Start Winlink Bridge -> kissattach up -> PAT web UI renders
+  in the tab -> connect ax25+linux://wl2k/<RMS> and pull mail, without leaving the
+  app. Stop -> PAT gone, port down, TX restored. Close -> no lingering pat http.
+
 2026-07-13 — Phase 0/1 (project pivot from AXTermPuter, scaffold + KISS codec)
 - New sibling project to AXTermPuter (~/Dev/Projects/AxTermPuter). Same
   feature scope (APRS messenger + AX.25 terminal for the UV-Pro), but as a

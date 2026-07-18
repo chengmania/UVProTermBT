@@ -2,6 +2,14 @@
 PyQt6
 pytest
 
+# Embedded PAT/Winlink web UI (the Winlink tab hosts PAT's localhost web UI in a
+# QWebEngineView). Installed via pip so it version-matches the pip PyQt6 above —
+# do NOT use the apt python3-pyqt6.qtwebengine, whose Qt version will ABI-clash.
+# It's a large wheel (~100 MB, bundles Chromium); if it can't be installed the
+# app degrades gracefully — the Winlink tab falls back to opening PAT in the
+# system browser (see uvprotermbt/gui/pat_panel.py).
+PyQt6-WebEngine
+
 # NOTE: the Bluetooth transport (uvprotermbt/link.py) also needs the BlueZ
 # D-Bus bindings, which are SYSTEM packages, not pip installs:
 #     sudo apt install python3-dbus python3-gi
