@@ -591,3 +591,53 @@ UVProTermBT — Session Log
 - NEEDS ON-AIR (Greg): fresh box → Start Winlink Bridge → install prompt →
   password → kissattach up → PAT ax25+linux://wl2k/RMS → pull messages, no
   manual socat/kissattach. Verify kissattach returns (doesn't block QProcess).
+
+2026-07-17 — Link reconnect fix (KeyError crash + connect/disconnect flapping)
+- Symptom (Greg): on a fresh program start the radio wouldn't reconnect —
+  appeared to connect then dropped, then locked in a connected/not-connected
+  cycle; traceback showed KeyError "Can't register the object-path handler for
+  '/org/bluez/uvprotermbt': there is already a handler".
+- Root cause 1 (the KeyError / thread crash): every RfcommKissLink registered
+  its _SerialProfile at the FIXED path /org/bluez/uvprotermbt on the process-
+  wide shared SystemBus, and _run()'s teardown called UnregisterProfile but
+  never _profile.remove_from_connection(). So Radio→Reconnect / Select Radio /
+  MAC change → _rebuild_link() stops the old link and news up a second one →
+  second _SerialProfile at the same path on the same bus → KeyError → link
+  thread dies → link never reconnects.
+- Fix 1: link.py now gives each instance a UNIQUE object path
+  (/org/bluez/uvprotermbt/link<id>), and _run()'s finally block calls
+  self._profile.remove_from_connection() (plus UnregisterProfile with the
+  instance path). Unique path avoids the collision; releasing the handler is
+  the correct teardown.
+- Root cause 2 (the flapping): a fd HUP and an already-queued retry each armed
+  their own _attempt_connect, which does Disconnect()-then-Connect() — two of
+  them racing produce org.bluez InProgress and a connect/disconnect storm.
+- Fix 2: reconnect timers now COALESCE — a single _reconnect_source id, guarded
+  in _schedule_reconnect (no-op if one is pending), cancelled in
+  _on_new_connection (we're up) and in _run() teardown. Added _cancel_reconnect.
+- Root cause 3 (the REAL "KDE says connected but the app isn't"): the app used
+  Device1.Connect() (blanket, all auto-connect profiles) + a whole-device
+  Disconnect() first. But the UV-Pro also advertises Handsfree/Audio-Gateway,
+  and BlueZ (radio Trusted + our profile AutoConnect) keeps the DEVICE connected
+  via that audio profile even when our KISS/SPP channel is down. In that state
+  Device1.Connect() is a no-op that never hands us the SPP fd → NewConnection
+  never fires → KDE shows "connected" while the app sits at ○ BT. And the
+  whole-device Disconnect() knocked out the audio profile too, fighting KDE and
+  driving the flapping.
+- Fix 3: drive OUR profile specifically — Device1.ConnectProfile(SPP_UUID)
+  instead of Connect(), and drop the whole-device Disconnect(). ConnectProfile
+  fires NewConnection with the RFCOMM fd even on an already-ACL-connected device.
+  On a non-transient error we DisconnectProfile(SPP_UUID) (just our profile, not
+  the device) to clear a stuck half-open SPP, then backoff-retry. Added a
+  duplicate-fd guard in _on_new_connection (AutoConnect can race our
+  ConnectProfile and offer a 2nd fd — keep the live one, close the dup).
+- VERIFIED LIVE (2026-07-17, device already Connected via audio gateway, app
+  closed): probe confirmed ConnectProfile fires NewConnection + delivers the fd;
+  the patched RfcommKissLink connects in ~0.5s, repeatably across 3 back-to-back
+  runs, with clean teardown (no KeyError, no stuck SPP).
+- tests/test_link.py (new, 3): distinct profile paths; _schedule_reconnect
+  coalesces to one timer; _on_new_connection cancels the pending reconnect and
+  resets backoff. GLib faked (pure bookkeeping, no real loop). Suite 44/44.
+- NEEDS ON-AIR (Greg): full app fresh start connects (● BT) and stays even when
+  KDE already shows the radio connected; Radio→Reconnect no longer crashes the
+  link thread; a wedged radio recovers without the flapping storm.

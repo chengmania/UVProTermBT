@@ -21,9 +21,18 @@ negotiation — the "channel" is discovered, never hard-coded.
 
 The Linux equivalent, implemented here, is to register a BlueZ
 `org.bluez.Profile1` (client role, SerialPort UUID), tell BlueZ to connect
-the device, and let BlueZ hand us the negotiated RFCOMM file descriptor via
-the profile's `NewConnection` callback. Reading that fd yields genuine raw
-KISS frames (C0 00 ... C0), no GaiaFrame envelope.
+*that profile* via `Device1.ConnectProfile(SPP_UUID)`, and let BlueZ hand us
+the negotiated RFCOMM file descriptor via the profile's `NewConnection`
+callback. Reading that fd yields genuine raw KISS frames (C0 00 ... C0), no
+GaiaFrame envelope.
+
+NOTE: use `ConnectProfile(SPP_UUID)`, not the blanket `Device1.Connect()`.
+The radio also advertises a Handsfree/Audio-Gateway profile, and BlueZ keeps
+the *device* connected via that audio profile even while our KISS channel is
+down — so KDE/`bluetoothctl` shows "Connected: yes" while `Device1.Connect()`
+no-ops and never fires `NewConnection`. ConnectProfile establishes our profile
+specifically and delivers the fd even on an already-connected device. See
+docs/PROTOCOL.md §3 "Connection gotchas".
 
 Requirements: python3-dbus and python3-gi (PyGObject), from the system —
 create the venv with `--system-site-packages`. See docs/PROTOCOL.md §3.
@@ -44,7 +53,12 @@ ReceiveCallback = Callable[[bytes], None]
 # The radio advertises the standard SerialPort service; BlueZ discovers the
 # RFCOMM channel for it via SDP, so we never hard-code a channel number.
 SPP_UUID = "00001101-0000-1000-8000-00805f9b34fb"
-_PROFILE_PATH = "/org/bluez/uvprotermbt"
+# Base for the profile's D-Bus object path. Each link instance appends a unique
+# suffix (see __init__) so two links in the same process — e.g. after
+# Radio -> Reconnect rebuilds the link on the shared SystemBus — never collide
+# at the same object path (that collision crashed the link thread with
+# "already a handler for /org/bluez/uvprotermbt").
+_PROFILE_PATH_BASE = "/org/bluez/uvprotermbt"
 _DEFAULT_ADAPTER = "hci0"
 
 _INITIAL_BACKOFF_S = 1.0
@@ -124,6 +138,9 @@ class RfcommKissLink:
         self._address = address
         self._adapter = adapter
         self._device_path = _device_path(adapter, address)
+        # Unique per-instance object path so a rebuilt link (new instance on the
+        # same shared SystemBus) doesn't collide with a not-yet-torn-down one.
+        self._profile_path = f"{_PROFILE_PATH_BASE}/link{id(self):x}"
 
         self._rx_queue: "queue.Queue[bytes]" = queue.Queue()
         self._on_receive: Optional[ReceiveCallback] = None
@@ -141,6 +158,10 @@ class RfcommKissLink:
         self._fd_watch: Optional[int] = None
         self._fd_lock = threading.Lock()
         self._backoff_s = _INITIAL_BACKOFF_S
+        # GLib timeout id of the single pending reconnect attempt, or None.
+        # Coalesced so a disconnect and an in-flight retry don't stack into
+        # racing Disconnect()/Connect() calls (BlueZ InProgress flapping).
+        self._reconnect_source: Optional[int] = None
 
     # ---- public API -----------------------------------------------------
 
@@ -217,7 +238,7 @@ class RfcommKissLink:
         self._loop = GLib.MainLoop()
 
         self._profile = _SerialProfile(
-            self._bus, _PROFILE_PATH,
+            self._bus, self._profile_path,
             on_new_connection=self._on_new_connection,
             on_release=lambda: None,
         )
@@ -226,7 +247,7 @@ class RfcommKissLink:
             "org.bluez.ProfileManager1",
         )
         try:
-            manager.RegisterProfile(_PROFILE_PATH, SPP_UUID, {
+            manager.RegisterProfile(self._profile_path, SPP_UUID, {
                 "Role": "client",
                 "Name": "UVProTermBT-KISS",
                 "AutoConnect": dbus.Boolean(True),
@@ -245,67 +266,115 @@ class RfcommKissLink:
         try:
             self._loop.run()
         finally:
+            self._cancel_reconnect()
             self._teardown_fd()
             try:
-                manager.UnregisterProfile(_PROFILE_PATH)
+                manager.UnregisterProfile(self._profile_path)
             except Exception:
                 pass
+            # Release the local D-Bus object handler too — UnregisterProfile
+            # only tells BlueZ to forget us; without this the object stays
+            # registered on the shared SystemBus and a later link at the same
+            # path would KeyError. (Unique paths already avoid the collision,
+            # but not leaking the handler is the correct teardown.)
+            try:
+                self._profile.remove_from_connection()
+            except Exception:
+                pass
+            self._profile = None
 
     def _attempt_connect(self) -> bool:
         if self._stop.is_set() or self.is_connected():
             return False
-        # Disconnect first to clear any stuck "br-connection-busy" state left
-        # by a previous half-open attempt or a competing profile (headset
-        # auto-connect), then connect. Both are async so we never block the
-        # loop; NewConnection is what actually signals success.
-        try:
-            self._device.Disconnect(
-                reply_handler=lambda: None,
-                error_handler=lambda e: None,
-            )
-        except dbus.DBusException:
-            pass
-
+        # Connect OUR SerialPort profile specifically — NOT Device1.Connect().
+        # The UV-Pro also advertises a Handsfree/Audio-Gateway profile, and
+        # BlueZ (with the radio Trusted + our profile AutoConnect) keeps the
+        # DEVICE connected via that audio profile even when our KISS channel is
+        # down. In that state Device1.Connect() is a no-op that never hands us
+        # the SPP fd — so KDE shows "connected" while the app sits at ○ BT and
+        # NewConnection never fires. ConnectProfile(SPP_UUID) connects just our
+        # profile and fires NewConnection with the RFCOMM fd even on an
+        # already-ACL-connected device (verified live 2026-07-17). It also
+        # avoids the whole-device Disconnect()/Connect() churn that fought the
+        # audio profile and produced the connect/disconnect flapping.
         def on_ok() -> None:
-            print("[link] Device1.Connect() completed")
+            print("[link] ConnectProfile(SPP) completed")
 
         def on_err(e) -> None:
-            # NoReply/InProgress/br-connection-busy are expected transients;
-            # NewConnection may still fire. Real listener-absent errors mean
-            # KISS TNC probably isn't enabled on the radio.
-            print(f"[link] Connect() pending/err: {e.get_dbus_name()}")
+            name = e.get_dbus_name()
+            print(f"[link] ConnectProfile() pending/err: {name}")
+            # InProgress/NoReply are transients where NewConnection may still
+            # fire — leave them alone. Anything else (AlreadyConnected, Failed,
+            # br-connection-busy) means our SPP channel is stuck half-open;
+            # drop just OUR profile (never the whole device — that would knock
+            # out the audio profile / KDE) so the next backoff retry can
+            # reconnect it cleanly.
+            if "InProgress" not in name and "NoReply" not in name:
+                try:
+                    self._device.DisconnectProfile(
+                        SPP_UUID,
+                        reply_handler=lambda: None,
+                        error_handler=lambda _e: None,
+                    )
+                except dbus.DBusException:
+                    pass
 
         try:
-            self._device.Connect(
+            self._device.ConnectProfile(
+                SPP_UUID,
                 reply_handler=on_ok,
                 error_handler=on_err,
                 timeout=_CONNECT_DBUS_TIMEOUT_S,
             )
         except dbus.DBusException as e:
-            print(f"[link] Connect() dispatch failed: {e.get_dbus_name()}")
+            print(f"[link] ConnectProfile() dispatch failed: {e.get_dbus_name()}")
 
         # Retry until we get an fd (or stop). Backs off up to _MAX_BACKOFF_S.
         self._schedule_reconnect()
         return False
 
     def _schedule_reconnect(self) -> None:
-        if self._stop.is_set():
+        # Coalesce: only ever one reconnect in flight. Without this, a fd HUP
+        # and an already-queued retry each schedule an _attempt_connect, and
+        # the two race Disconnect()/Connect() calls into org.bluez InProgress
+        # errors — the connect/disconnect flapping we saw on a wedged radio.
+        if self._stop.is_set() or self._reconnect_source is not None:
             return
         delay_ms = int(self._backoff_s * 1000)
         self._backoff_s = min(self._backoff_s * 2, _MAX_BACKOFF_S)
 
         def _retry() -> bool:
+            self._reconnect_source = None
             if self._stop.is_set() or self.is_connected():
                 return False
             self._attempt_connect()
             return False
 
-        GLib.timeout_add(delay_ms, _retry)
+        self._reconnect_source = GLib.timeout_add(delay_ms, _retry)
+
+    def _cancel_reconnect(self) -> None:
+        if self._reconnect_source is not None:
+            try:
+                GLib.source_remove(self._reconnect_source)
+            except Exception:
+                pass
+            self._reconnect_source = None
 
     def _on_new_connection(self, fd: int) -> None:
+        if self._connected.is_set():
+            # Duplicate NewConnection (e.g. BlueZ AutoConnect racing our
+            # ConnectProfile). Keep the live fd; close and discard this one so
+            # we don't leak it or read two RFCOMM streams into one queue.
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            return
         with self._fd_lock:
             self._fd = fd
         self._connected.set()
+        # We're up — drop any pending reconnect attempt and reset the backoff.
+        self._cancel_reconnect()
         self._backoff_s = _INITIAL_BACKOFF_S
         self._fd_watch = GLib.io_add_watch(
             fd, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self._on_fd_event

@@ -263,14 +263,25 @@ KISS frame  port=0 cmd=0 len=47  KC3SMW-7 > TPQS3U-0 via WIDE1-1,WIDE2-1
 ```
 
 ### Connection gotchas
-- `Device1.Connect()` frequently returns `NoReply`/`br-connection-busy`
-  while BlueZ finishes in the background — the `NewConnection` callback is
-  the real success signal, so those are non-fatal (link.py treats them as
-  transient and keeps a backoff retry running).
-- `br-connection-busy` also appears when something else is mid-connect:
-  KDE auto-connect, a stale `rfcomm bind`, or a prior `ConnectProfile`
-  still in flight. link.py issues a `Disconnect()` before each `Connect()`
-  to clear it.
+- **Use `Device1.ConnectProfile(SPP_UUID)`, NOT `Device1.Connect()`**
+  (learned 2026-07-17). The radio also advertises Handsfree / Audio Gateway,
+  and BlueZ — with the radio `Trusted` and the profile `AutoConnect` — keeps
+  the *device* connected via that audio profile even while our KISS/SPP
+  channel is down. In that state `bluetoothctl`/KDE shows **Connected: yes**,
+  but `Device1.Connect()` is a no-op that never establishes our SerialPort
+  profile, so `NewConnection` never fires and the app sits at ○ BT.
+  `ConnectProfile(SPP_UUID)` connects *just our profile* and fires
+  `NewConnection` with the RFCOMM fd even on an already-ACL-connected device
+  (verified live: connects in ~0.5 s, repeatably). link.py uses ConnectProfile.
+- **Never `Device1.Disconnect()` the whole device to "clear" a stuck state** —
+  it also tears down the audio profile KDE/Pulse holds, so BlueZ immediately
+  re-connects it and you get a connect/disconnect flap. To clear a stuck
+  half-open SPP, use `Device1.DisconnectProfile(SPP_UUID)` (our profile only).
+- `ConnectProfile()` often returns `InProgress`/`NoReply`/`br-connection-busy`
+  while BlueZ finishes in the background (its own AutoConnect can be racing the
+  same profile) — the `NewConnection` callback is the real success signal, so
+  those are non-fatal (link.py treats them as transient and keeps a backoff
+  retry running; a duplicate `NewConnection` from the race is closed/ignored).
 - `bluetoothctl connect` may report `br-connection-refused` even when the
   profile path works — it tries the SDP-advertised profiles (incl. the
   Handsfree Audio Gateway, which the radio refuses / shows as a "headset").
