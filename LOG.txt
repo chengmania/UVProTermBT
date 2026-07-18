@@ -1,6 +1,20 @@
 UVProTermBT — Session Log
 =========================
 
+2026-07-17 — Winlink fail-safe: GUI popup when PAT is missing
+- Before: PAT-absent only printed a text line in the Winlink log, AFTER kissattach
+  had already run. Now _start_bridge checks shutil.which("pat") right after the
+  BT-connected check and, if missing, calls _warn_pat_missing() and stops (no
+  point bringing up kissattach without PAT).
+- _warn_pat_missing (main_window.py): a QMessageBox (Warning) — "Winlink needs
+  PAT, which isn't installed" — with an "Open getpat.io" button (QDesktopServices)
+  and step-by-step install instructions (download .deb, apt install, pat
+  configure, retry). Also logs a Winlink note. pat_panel's own which("pat") check
+  stays as a secondary guard.
+- tests/test_winlink_gui.py (new, 2): PAT-missing stops the bridge (warn called,
+  _do_attach not); _warn_pat_missing builds + logs without error (QMessageBox
+  stubbed). Construction hermetic (link.begin/dbus/bt stubbed). Suite 54/54.
+
 2026-07-17 — Desktop launcher icon (app menu + Desktop)
 - Greg wanted a clickable desktop icon. install.sh previously only made an
   app-menu entry; now it also drops one on the Desktop.

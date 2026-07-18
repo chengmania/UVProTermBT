@@ -605,6 +605,9 @@ class MainWindow(QMainWindow):
             self._sys(WINLINK, "connect the radio first — wait for ● BT.")
             return
         import shutil
+        if shutil.which("pat") is None:
+            self._warn_pat_missing()
+            return
         if shutil.which("kissattach") is None:
             from PyQt6.QtWidgets import QMessageBox
             r = QMessageBox.question(
@@ -617,6 +620,39 @@ class MainWindow(QMainWindow):
             self._run_helper(["install"], self._after_install)
             return
         self._do_attach()
+
+    def _warn_pat_missing(self) -> None:
+        """PAT isn't installed — Winlink can't work without it. Show a clear GUI
+        popup with a link + install instructions instead of failing quietly."""
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtWidgets import QMessageBox
+
+        url = "https://getpat.io/"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("PAT is not installed")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText("<b>Winlink needs PAT, which isn’t installed.</b>")
+        box.setInformativeText(
+            "PAT is a free, separate program that speaks the Winlink protocol. "
+            "UVProTermBT embeds PAT’s interface but does not bundle PAT itself."
+            "<br><br>"
+            "<b>Install it:</b><br>"
+            "1. Download PAT from <a href='{url}'>{url}</a> "
+            "(Debian/Ubuntu: the <code>.deb</code>).<br>"
+            "2. Install it, e.g. <code>sudo apt install ./pat_*_amd64.deb</code>.<br>"
+            "3. Configure your callsign and Winlink password in PAT "
+            "(<code>pat configure</code>).<br>"
+            "4. Come back and click <b>Start Winlink Bridge</b> again."
+            .format(url=url))
+        open_btn = box.addButton("Open getpat.io", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Close)
+        box.exec()
+        if box.clickedButton() is open_btn:
+            QDesktopServices.openUrl(QUrl(url))
+        self._sys(WINLINK, "PAT is not installed — Winlink can’t start. "
+                           "Install it from getpat.io, then try again.")
 
     def _after_install(self, ok: bool) -> None:
         import shutil
