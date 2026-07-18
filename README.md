@@ -75,3 +75,12 @@ APRS beacon off while using it as a TNC.
 By Greg, **KC3SMW**. Built on findings from the sibling
 [AXTermPuter](https://github.com/chengmania/AXTermPuter) project and the
 `khusmann/benlink` radio reverse-engineering work.
+
+Copyright (C) 2026 Greg (KC3SMW).
+
+UVProTermBT is free software: you can redistribute it and/or modify it under the
+terms of the **GNU General Public License v3.0** as published by the Free Software
+Foundation. This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the [`LICENSE`](LICENSE) file for the full
+license text, or <https://www.gnu.org/licenses/gpl-3.0.html>.
