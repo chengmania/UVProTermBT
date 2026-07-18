@@ -37,8 +37,28 @@ def _ensure_qt_lib_path() -> None:
     os.execv(sys.executable, [sys.executable, "-m", "uvprotermbt", *sys.argv[1:]])
 
 
+def _enable_webengine_gl_sharing() -> None:
+    """Enable OpenGL context sharing before any QApplication is created.
+
+    The embedded PAT/Winlink view (QWebEngineView) requires either that
+    QtWebEngineWidgets be imported, or that Qt.AA_ShareOpenGLContexts be set,
+    BEFORE the QApplication exists. We import WebEngine lazily (only when the
+    Winlink tab is built), so without this the later import raises and the tab
+    silently falls back to opening PAT in an external browser. Setting the
+    attribute here — cheap, and without eagerly loading ~100 MB of Chromium —
+    lets that lazy import succeed so PAT embeds in the window.
+    """
+    try:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QApplication
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+    except Exception:
+        pass
+
+
 def main() -> None:
     _ensure_qt_lib_path()  # must run before any Qt import
+    _enable_webengine_gl_sharing()  # must run before any QApplication is created
 
     from PyQt6.QtGui import QIcon
     from PyQt6.QtWidgets import QApplication

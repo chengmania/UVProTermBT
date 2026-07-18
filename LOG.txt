@@ -1,6 +1,32 @@
 UVProTermBT — Session Log
 =========================
 
+2026-07-17 — Fix: embedded PAT opened a browser instead of embedding
+- Symptom (Greg): the Winlink tab opened PAT in an external browser rather than
+  embedding it in the window.
+- Root cause: QtWebEngine requires QtWebEngineWidgets be imported OR
+  Qt.AA_ShareOpenGLContexts be set BEFORE the QApplication is created. main()
+  creates QApplication first, and pat_panel (which imports QWebEngineView at
+  module top) is only imported later/lazily when the Winlink tab is built — so
+  the import raised "must be imported ... before a QCoreApplication instance is
+  created", pat_panel's guarded except swallowed it, WEBENGINE_AVAILABLE went
+  False, and _after_attach took the browser fallback. (Earlier verification
+  imported pat_panel BEFORE QApplication, so it missed this.)
+- Fix: __main__._enable_webengine_gl_sharing() sets AA_ShareOpenGLContexts before
+  QApplication (called right after the lib-path shim, before the app/wizard).
+  Attribute-only — no eager ~100 MB Chromium import; the WebEngine import stays
+  lazy for users who never open Winlink, and now succeeds so PAT embeds.
+- Verified in the real app order (LD path set as the shim produces): QApplication
+  after the attribute -> lazy pat_panel import -> WEBENGINE_AVAILABLE True,
+  MainWindow._pat_panel._view is a real QWebEngineView (VERDICT: EMBEDS-IN-WINDOW).
+  Without the attribute: False / NoneType (reproduced the bug).
+- tests/test_pat_panel.py: qapp fixture now calls the helper before creating the
+  app (as main() does) + test_gl_sharing_attribute_enabled asserts the attribute
+  took. Suite 51/51.
+- NOTE (possible follow-up): if the embedded pane renders BLANK in a real
+  X/Wayland session (import works but Chromium won't paint), QtWebEngine may need
+  QTWEBENGINE_DISABLE_SANDBOX=1 or GPU flags — not added now (security/scope).
+
 2026-07-17 — Phase C.3: embed the PAT Winlink web UI in-window
 - Before: the Winlink tab only did the bridge half (kissattach) and told the user
   to leave the app and run PAT in a terminal. Now PAT's own web UI (compose/read/

@@ -23,6 +23,9 @@ from uvprotermbt.gui.pat_panel import PatPanel, _pat_http_url  # noqa: E402
 @pytest.fixture(scope="module")
 def qapp():
     from PyQt6.QtWidgets import QApplication
+
+    from uvprotermbt.__main__ import _enable_webengine_gl_sharing
+    _enable_webengine_gl_sharing()  # must precede QApplication, exactly as main() does
     app = QApplication.instance() or QApplication([])
     yield app
 
@@ -114,6 +117,17 @@ class _FakeProc:
 
     def readAllStandardOutput(self):
         return b""
+
+
+def test_gl_sharing_attribute_enabled(qapp):
+    """Regression: QWebEngineView can only be imported after QApplication if
+    AA_ShareOpenGLContexts was set beforehand. Otherwise the Winlink tab silently
+    falls back to an external browser. The qapp fixture calls the entrypoint
+    helper before creating the app, exactly as main() does; assert it took."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QApplication
+
+    assert QApplication.testAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
 
 def test_start_launches_pat_http(qapp, monkeypatch):
