@@ -60,6 +60,7 @@ class MainWindow(QMainWindow):
         self._bridge_active = False
         self._helper_proc = None       # pkexec QProcess (kissattach/install/detach)
         self._pat_panel = None         # embedded PAT web UI (built in _build_winlink_tab)
+        self._closing = False          # set in closeEvent so async callbacks bail cleanly
         # per-tab message records, so a theme switch can re-render with new colors
         self._records: dict[str, list[tuple]] = {m: [] for m in MODES}
         self._views: dict[str, QTextEdit] = {}
@@ -314,10 +315,17 @@ class MainWindow(QMainWindow):
         return escape(str(rec))
 
     def _append_html(self, mode: str, html: str) -> None:
+        if self._closing:
+            return
         view = self._views[mode]
-        view.moveCursor(QTextCursor.MoveOperation.End)
-        view.insertHtml(html + "<br>")
-        view.moveCursor(QTextCursor.MoveOperation.End)
+        try:
+            view.moveCursor(QTextCursor.MoveOperation.End)
+            view.insertHtml(html + "<br>")
+            view.moveCursor(QTextCursor.MoveOperation.End)
+        except RuntimeError:
+            # The underlying C++ QTextEdit was deleted (window tearing down while
+            # a late signal fires) — nothing to draw into, so drop it quietly.
+            pass
 
     def _rerender_all(self) -> None:
         for mode, view in self._views.items():
@@ -680,17 +688,26 @@ class MainWindow(QMainWindow):
         self._helper_proc = proc  # keep a reference alive
 
         def finished(code, _status):
-            out = bytes(proc.readAllStandardOutput()).decode("utf-8", "replace")
-            err = bytes(proc.readAllStandardError()).decode("utf-8", "replace")
+            if self._closing:
+                return
+            try:
+                out = bytes(proc.readAllStandardOutput()).decode("utf-8", "replace")
+                err = bytes(proc.readAllStandardError()).decode("utf-8", "replace")
+            except RuntimeError:
+                return  # proc deleted during teardown
             for line in (out + err).splitlines():
                 if line.strip():
                     self._sys(WINLINK, f"  {line.strip()}")
             if on_done is not None:
                 on_done(code == 0)
 
+        def error_occurred(_e):
+            if self._closing:
+                return  # process killed by our own teardown, not a real failure
+            self._sys(WINLINK, "could not launch pkexec (is policykit installed?)")
+
         proc.finished.connect(finished)
-        proc.errorOccurred.connect(
-            lambda _e: self._sys(WINLINK, "could not launch pkexec (is policykit installed?)"))
+        proc.errorOccurred.connect(error_occurred)
         proc.start("pkexec", [helper] + list(args))
 
     # ---- link lifecycle / status ----------------------------------------
@@ -782,6 +799,23 @@ class MainWindow(QMainWindow):
             "KC3SMW • styled after OpenWave.")
 
     def closeEvent(self, event):  # noqa: N802
+        # Stop async callbacks from drawing into widgets Qt is about to delete.
+        self._closing = True
+        # A pkexec helper may still be running (e.g. the user closed the window
+        # while its password prompt was up). Disconnect its signals and stop it
+        # so its dying finished/errorOccurred don't fire into deleted widgets.
+        if self._helper_proc is not None:
+            try:
+                self._helper_proc.finished.disconnect()
+                self._helper_proc.errorOccurred.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                if self._helper_proc.state() != QProcess.ProcessState.NotRunning:
+                    self._helper_proc.kill()
+                    self._helper_proc.waitForFinished(1000)
+            except RuntimeError:
+                pass
         try:
             self.settings.save()
         except Exception:

@@ -1,6 +1,26 @@
 UVProTermBT — Session Log
 =========================
 
+2026-07-17 — Fix: crash-spew when closing the window mid-pkexec (tablet)
+- Symptom (HiMax10 tablet): after clicking Winlink, a burst of tracebacks —
+  "QProcess: Destroyed while process (pkexec) is still running", then
+  "RuntimeError: wrapped C/C++ object of type QTextEdit/QProcess has been
+  deleted" from the _run_helper finished/errorOccurred callbacks.
+- Cause: the pkexec helper QProcess is parented to MainWindow. When the window is
+  destroyed (app closing) while pkexec is still running, Qt deletes the QProcess
+  (killing pkexec) and the QTextEdit views; the QProcess's dying finished/
+  errorOccurred signals then fire into already-deleted C++ objects → RuntimeError
+  spew. Shutdown noise, not a functional crash, but ugly and alarming.
+- Fix (main_window.py): _closing flag set first in closeEvent; _run_helper's
+  finished/error_occurred callbacks bail if _closing (and guard proc access with
+  try/except RuntimeError); _append_html no-ops if _closing and swallows
+  RuntimeError from a deleted view; closeEvent disconnects + kills the helper
+  QProcess before teardown. Verified headless: close with a running helper →
+  _closing True, helper stopped, no tracebacks. Suite 52/52.
+- OPEN (needs Greg): whether Winlink's pkexec/polkit actually works on the tablet
+  (did a graphical password prompt appear?) — the errorOccurred here was the
+  teardown kill, not necessarily a real launch failure. Confirm a PolicyKit agent
+  runs on the HiMax10.
 2026-07-17 — Fix: embedded PAT opened a browser instead of embedding
 - Symptom (Greg): the Winlink tab opened PAT in an external browser rather than
   embedding it in the window.
