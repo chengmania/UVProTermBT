@@ -131,3 +131,11 @@ Foundation. This program is distributed in the hope that it will be useful, but
 WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
 FITNESS FOR A PARTICULAR PURPOSE. See the [`LICENSE`](LICENSE) file for the full
 license text, or <https://www.gnu.org/licenses/gpl-3.0.html>.
+
+### Credits
+
+The SSTV feature — the radio's Bluetooth **audio** channel, the GAIA control
+protocol, and the SBC audio format — was reverse-engineered from
+**[HTCommander](https://github.com/Ylianst/HTCommander)** by Ylian Saint-Hilaire.
+Without HTCommander as a working reference, transmit over the audio channel would
+not have been possible. See [`docs/GAIA_AUDIO_SSTV.md`](docs/GAIA_AUDIO_SSTV.md).
