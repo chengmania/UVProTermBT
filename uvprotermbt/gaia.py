@@ -25,11 +25,32 @@ GAIA_VER = 0x01
 GROUP_BASIC = 2
 GROUP_EXTENDED = 10
 
-# RadioBasicCommand ids we care about for the probe.
+# RadioBasicCommand ids we care about.
 CMD_GET_DEV_ID = 1
 CMD_GET_DEV_INFO = 4
 CMD_READ_STATUS = 5
+CMD_REGISTER_NOTIFICATION = 6
+CMD_EVENT_NOTIFICATION = 9
 CMD_GET_HT_STATUS = 20
+
+# RadioNotification ids (events the radio pushes once registered).
+NOTIF_HT_STATUS_CHANGED = 1
+NOTIF_RADIO_STATUS_CHANGED = 8
+NOTIF_FREQ_MODE_STATUS_CHANGED = 14
+
+
+def handshake_frames() -> list[bytes]:
+    """The GAIA connect handshake HTCommander sends, which makes the radio treat
+    us as an active controller (registering for HT/radio-status notifications).
+    Believed to be what enables the audio transmit path. See radio.dart connect."""
+    return [
+        encode(GROUP_BASIC, CMD_GET_DEV_INFO, bytes([3])),
+        encode(GROUP_BASIC, CMD_REGISTER_NOTIFICATION,
+               bytes([NOTIF_HT_STATUS_CHANGED, NOTIF_FREQ_MODE_STATUS_CHANGED])),
+        encode(GROUP_BASIC, CMD_REGISTER_NOTIFICATION,
+               bytes([NOTIF_RADIO_STATUS_CHANGED])),
+        encode(GROUP_BASIC, CMD_GET_HT_STATUS),
+    ]
 
 
 def encode(group: int, command: int, data: bytes = b"") -> bytes:

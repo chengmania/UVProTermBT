@@ -109,6 +109,9 @@ def _main() -> None:
                     help="seconds of audio to buffer ahead (radio keys once buffered)")
     ap.add_argument("--settle", type=float, default=2.0,
                     help="seconds to wait after the channel opens before transmitting")
+    ap.add_argument("--control", action="store_true",
+                    help="also open the SPP control channel and do the GAIA "
+                         "handshake first (needed for the radio to key on TX)")
     args = ap.parse_args()
 
     if not args.tone and not args.image:
@@ -134,6 +137,36 @@ def _main() -> None:
 
     print("⚠ This TRANSMITS on your radio's current frequency. ID and keep it legal.")
     mac = args.mac or Settings.load().bt_mac
+
+    # Optionally bring up the GAIA control channel first (SPP), do the handshake
+    # that registers us as an active controller, and keep it alive during TX.
+    control = None
+    ctrl_frames = []
+    if args.control:
+        from . import gaia
+        from .link import RfcommKissLink
+        ctrl_dec = gaia.GaiaDecoder()
+
+        def on_ctrl(data: bytes) -> None:
+            ctrl_frames.extend(ctrl_dec.feed(data))
+
+        control = RfcommKissLink(mac)  # SPP; carries GAIA
+        control.on_receive(on_ctrl)
+        print("[tx] opening SPP control channel + GAIA handshake …")
+        control.begin()
+        for _ in range(100):
+            if control.is_connected():
+                break
+            control.poll()
+            time.sleep(0.05)
+        for fr in gaia.handshake_frames():
+            control.send(fr)
+            time.sleep(0.2)
+            control.poll()
+        time.sleep(0.5)
+        control.poll()
+        print(f"[tx] control channel up; {len(ctrl_frames)} GAIA replies so far")
+
     link = RfcommAudioLink(mac)
 
     # Diagnostic: watch what the radio sends back. If we see command 0x09
@@ -171,17 +204,28 @@ def _main() -> None:
         drain_end = time.monotonic() + 2.0
         while time.monotonic() < drain_end:
             link.poll()
+            if control is not None:
+                control.poll()
             time.sleep(0.05)
         link.stop()
+        if control is not None:
+            control.stop()
 
     echo = rx_cmds.get(0x09, 0)
     print(f"\n[diag] frames from radio during TX (by cmd): {dict(rx_cmds)}")
     if echo:
         print(f"[diag] saw {echo} TX-echo frames (0x09) — the radio IS ingesting "
-              "our audio as transmit. This is a keying problem, not a data problem.")
+              "our audio as transmit. 🎉")
     else:
         print("[diag] no TX-echo (0x09) frames — the radio is NOT treating our "
-              "audio as a transmission (likely needs the GAIA control channel).")
+              "audio as a transmission.")
+    if args.control:
+        from . import gaia
+        events = [f for f in ctrl_frames if f.command == gaia.CMD_EVENT_NOTIFICATION]
+        print(f"[diag] control channel: {len(ctrl_frames)} GAIA frames, "
+              f"{len(events)} event notifications")
+        for f in events[:8]:
+            print(f"        event data[{len(f.data)}]={f.data.hex(' ')}")
 
 
 if __name__ == "__main__":
