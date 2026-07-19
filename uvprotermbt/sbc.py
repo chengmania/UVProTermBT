@@ -126,12 +126,18 @@ class SbcEncoder:
         self._sbc.bitpool = RADIO_BITPOOL
         self._sbc.endian = SBC_LE
         self._codesize = self._lib.sbc_get_codesize(ctypes.byref(self._sbc))
+        self._frame_length = self._lib.sbc_get_frame_length(ctypes.byref(self._sbc))
         self._buf = bytearray()
         self._out = ctypes.create_string_buffer(1024)
 
     @property
     def pcm_bytes_per_frame(self) -> int:
         return self._codesize
+
+    @property
+    def frame_length(self) -> int:
+        """Encoded size of one SBC frame in bytes (88 for the radio's format)."""
+        return self._frame_length
 
     def encode(self, pcm: bytes) -> bytes:
         """Encode whole SBC frames from PCM; buffers a trailing partial frame."""

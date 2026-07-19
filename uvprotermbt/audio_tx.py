@@ -64,20 +64,32 @@ def transmit_pcm(link, pcm: bytes, *, sample_rate: int = RADIO_SAMPLE_RATE,
     lead never keys the radio; you just get a blip at the END frame)."""
     encoder = SbcEncoder()
     bytes_per_chunk = (sample_rate * chunk_ms // 1000) * 2  # 16-bit mono
+    # Match HTCommander: small audio frames of ~4 SBC frames (~352 B), not one
+    # giant frame — the radio ingests these but ignores oversized ones.
+    packet_sbc = encoder.frame_length * 4
     total = len(pcm)
     sent_audio_s = 0.0
     start = time.monotonic()
-    log(f"[tx] transmitting {total / 2 / sample_rate:.1f} s of audio …")
+    log(f"[tx] transmitting {total / 2 / sample_rate:.1f} s of audio "
+        f"({encoder.frame_length}-byte SBC frames, {packet_sbc}-byte packets) …")
 
     pos = 0
     frames = 0
+    sbc_buf = bytearray()
+
+    def flush(force: bool = False) -> None:
+        nonlocal frames
+        while len(sbc_buf) >= packet_sbc or (force and sbc_buf):
+            piece = bytes(sbc_buf[:packet_sbc])
+            del sbc_buf[:packet_sbc]
+            link.send(encode_frame(CMD_TX_AUDIO, piece))
+            frames += 1
+
     while pos < total:
         chunk = pcm[pos:pos + bytes_per_chunk]
         pos += len(chunk)
-        sbc = encoder.encode(chunk)
-        if sbc:
-            link.send(encode_frame(CMD_TX_AUDIO, sbc))
-            frames += 1
+        sbc_buf += encoder.encode(chunk)
+        flush()
         sent_audio_s += len(chunk) / 2 / sample_rate
         if on_tick is not None:
             on_tick(time.monotonic() - start)
@@ -86,10 +98,7 @@ def transmit_pcm(link, pcm: bytes, *, sample_rate: int = RADIO_SAMPLE_RATE,
         if ahead > lead_s:
             time.sleep(ahead - lead_s)
 
-    # Flush any buffered partial frame, then tell the radio to stop.
-    tail = encoder.encode(b"\x00" * encoder.pcm_bytes_per_frame)
-    if tail:
-        link.send(encode_frame(CMD_TX_AUDIO, tail))
+    flush(force=True)  # send any remaining SBC frames
     link.send(END_AUDIO_FRAME)
     encoder.close()
     log(f"[tx] done — {frames} audio frames, sent END_AUDIO_FRAME (unkey).")
