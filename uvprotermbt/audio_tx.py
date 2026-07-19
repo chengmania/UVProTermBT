@@ -49,7 +49,8 @@ def pcm_from_wav(path: str) -> tuple[bytes, int]:
 
 
 def transmit_pcm(link, pcm: bytes, *, sample_rate: int = RADIO_SAMPLE_RATE,
-                 lead_s: float = 10.0, chunk_ms: int = 200,
+                 lead_s: float = 2.0, chunk_ms: int = 200,
+                 on_tick: Optional[Callable[[float], None]] = None,
                  log: Callable[[str], None] = print) -> None:
     """SBC-encode `pcm`, frame it (cmd 0x00), and stream it to `link` paced to
     real time, then send END_AUDIO_FRAME. `link` is a connected RfcommAudioLink.
@@ -78,6 +79,8 @@ def transmit_pcm(link, pcm: bytes, *, sample_rate: int = RADIO_SAMPLE_RATE,
             link.send(encode_frame(CMD_TX_AUDIO, sbc))
             frames += 1
         sent_audio_s += len(chunk) / 2 / sample_rate
+        if on_tick is not None:
+            on_tick(time.monotonic() - start)
         # Pace: never run more than `lead_s` ahead of real time.
         ahead = sent_audio_s - (time.monotonic() - start)
         if ahead > lead_s:
@@ -197,8 +200,28 @@ def _main() -> None:
         while time.monotonic() < settle_end:
             link.poll()
             time.sleep(0.05)
+    # Watch the control channel in real time during TX and print when the
+    # radio's htStatus TX bit (0x40) flips — tells us exactly when it keys.
+    on_tick = None
+    if control is not None:
+        from . import gaia
+        seen = [0]
+        last_tx = [None]
+
+        def on_tick(elapsed: float) -> None:  # noqa: F811
+            control.poll()
+            for f in ctrl_frames[seen[0]:]:
+                if f.command == gaia.CMD_EVENT_NOTIFICATION and f.data[:1] == b"\x01" \
+                        and len(f.data) >= 2:
+                    tx = bool(f.data[1] & 0x40)
+                    if tx != last_tx[0]:
+                        print(f"  [key] t={elapsed:5.1f}s  TX={'ON ' if tx else 'off'}"
+                              f"  (htStatus {f.data.hex(' ')})")
+                        last_tx[0] = tx
+            seen[0] = len(ctrl_frames)
+
     try:
-        transmit_pcm(link, pcm, sample_rate=sr, lead_s=args.lead)
+        transmit_pcm(link, pcm, sample_rate=sr, lead_s=args.lead, on_tick=on_tick)
     finally:
         # Drain anything the radio sent back (echo/response) for ~2 s.
         drain_end = time.monotonic() + 2.0
