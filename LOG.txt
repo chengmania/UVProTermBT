@@ -1,6 +1,19 @@
 UVProTermBT — Session Log
 =========================
 
+2026-07-19 — v0.9.6: SSTV UX polish + BBS traffic monitor
+- SSTV tab: split into Receive / Transmit sub-tabs (shared Enable+status on top);
+  Load Image (preview, no RF) is now separate from Send (deliberate transmit,
+  auto-enables the audio channel); images auto-fit to the mode's size before
+  encoding (pysstv only reads the top-left W×H, so a big source used to send a
+  corner); RX auto-detects the mode from the VIS header and shows it.
+- BBS tab: added a raw AX.25 traffic monitor strip below the conversation — every
+  frame heard (source>dest via path, type, info snippet), capped at 1000 lines.
+- Docs: README screenshots (Chat/BBS/Winlink/SSTV + direwolf proof), supported
+  SSTV modes table (TX vs RX differ), Credits (HTCommander, PAT, pysstv,
+  colaclanth sstv, BlueZ, PyQt6); dropped the self/benlink credit line.
+- __version__ 0.9.6. Suite 81/81.
+
 2026-07-19 — v0.9.5: SSTV tab (M5) — the finished feature
 - gui/sstv_tab.py (new): SstvTab widget. Enable SSTV opens the RfcommAudioLink
   (alongside KISS) and sends the GAIA handshake on the KISS/SPP link (radio
