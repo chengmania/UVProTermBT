@@ -73,6 +73,31 @@ KISS TNC → Enable KISS TNC) and **pair** it to this computer.
   disconnect.
 - **Up/Down** recalls previous input; double-click a heard station to set it as
   your chat target; **Ctrl-T** toggles the theme.
+- **SSTV:** *Transmit* sub-tab — pick a mode, **Load Image…** (preview), **Send**.
+  *Receive* sub-tab — leave it enabled; incoming images decode automatically (the
+  mode is auto-detected, no selector). Images save to `~/.local/share/uvprotermbt/sstv/`.
+
+## SSTV modes
+
+Transmit uses **pysstv**; receive/auto-decode uses the **colaclanth SSTV
+decoder**. They don't cover exactly the same set, so which modes are available
+depends on the direction:
+
+| Direction | Modes |
+|---|---|
+| **Transmit** (17) | Robot36 · Martin M1/M2 · Scottie S1/S2/DX · PD90/120/160/180/240/290 · Pasokon P3/P5/P7 · Wraase SC2-120/SC2-180 |
+| **Receive / decode** (7) | Robot 36 · Robot 72 · Martin 1/2 · Scottie 1/2/DX (auto-detected from the VIS header) |
+| **Both send + receive in-app** | **Robot36** · Martin M1/M2 · Scottie S1/S2/DX |
+
+- **Robot36** is the recommended default — fast, robust, universal, and works
+  end-to-end within the app.
+- You can transmit any of the 17 modes; the *receiving* station decodes with
+  whatever SSTV software it runs (most decode all of these).
+- PD / Pasokon / Wraase **transmit** fine but this app can't **decode** them if
+  *received*. Robot72 is receive-only here (the decoder handles it; pysstv can't
+  encode it).
+- Neither library covers every historical SSTV mode — that's a limit of the SSTV
+  libraries, not the radio link.
 
 ## Troubleshooting
 
