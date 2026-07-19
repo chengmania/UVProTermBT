@@ -57,6 +57,7 @@ class SstvTab(QWidget):
         self._enabled = False
         self._transmitting = False
         self._decoding = False
+        self._pending_tx = None       # (path, mode) chosen, waiting for the channel
 
         self._deframer = AudioFrameDecoder()
         self._sbc = SbcDecoder()
@@ -105,9 +106,10 @@ class SstvTab(QWidget):
         v.addWidget(self._info)
 
     def _refresh_controls(self) -> None:
-        ready = self._enabled and self._audio is not None and self._audio.is_connected()
-        self._send_btn.setEnabled(ready and not self._transmitting and sstv.ENCODE_AVAILABLE)
-        self._mode.setEnabled(ready and not self._transmitting)
+        # Choosing/sending an image is always available (it auto-enables SSTV);
+        # only gate on the encoder being installed and not already transmitting.
+        self._send_btn.setEnabled(sstv.ENCODE_AVAILABLE and not self._transmitting)
+        self._mode.setEnabled(not self._transmitting)
         self._enable_btn.setText("Disable SSTV" if self._enabled else "Enable SSTV")
 
     # ---- enable / disable ------------------------------------------------
@@ -214,12 +216,39 @@ class SstvTab(QWidget):
     # ---- TX --------------------------------------------------------------
 
     def _send_image(self) -> None:
+        if not sstv.ENCODE_AVAILABLE:
+            self._log("SSTV transmit needs pysstv (pip install pysstv).")
+            return
         path, _ = QFileDialog.getOpenFileName(
-            self, "Choose an image to transmit", "",
+            self, "Choose an image to transmit", os.path.expanduser("~"),
             "Images (*.png *.jpg *.jpeg *.bmp *.gif)")
         if not path:
             return
         mode = self._mode.currentText()
+        # Preview the chosen image.
+        pm = QPixmap(path)
+        if not pm.isNull():
+            self._image.setPixmap(pm.scaled(
+                self._image.width(), self._image.height(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+        self._info.setText(f"queued for {mode}: {os.path.basename(path)}")
+        self._pending_tx = (path, mode)
+        # Auto-enable SSTV (opens the audio channel) if needed; the transmit fires
+        # from poll() once the channel is up.
+        if not self._enabled:
+            self._log("enabling SSTV to transmit…")
+            self._enable()
+        self._try_start_pending()
+
+    def _try_start_pending(self) -> None:
+        if self._pending_tx is None or self._transmitting:
+            return
+        if not (self._enabled and self._audio is not None and self._audio.is_connected()):
+            self._status.setText("SSTV: waiting for the audio channel to transmit…")
+            return
+        path, mode = self._pending_tx
+        self._pending_tx = None
         self._transmitting = True
         self._status.setText(f"SSTV: transmitting {mode}…")
         self._refresh_controls()
@@ -249,6 +278,7 @@ class SstvTab(QWidget):
                 if self._status.text().endswith(("…", "down")) or "listening" in self._status.text() \
                         or "opening" in self._status.text():
                     self._status.setText(f"SSTV: {st}")
+        self._try_start_pending()
         self._maybe_decode()
         self._drain_results()
 
