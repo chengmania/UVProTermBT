@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
         self._helper_proc = None       # pkexec QProcess (kissattach/install/detach)
         self._pat_panel = None         # embedded PAT web UI (built in _build_winlink_tab)
         self._sstv_tab = None          # SstvTab (built in _build_sstv_tab)
+        self._bbs_monitor = None       # raw-traffic monitor (built in _build_bbs_tab)
         self._closing = False          # set in closeEvent so async callbacks bail cleanly
         # per-tab message records, so a theme switch can re-render with new colors
         self._records: dict[str, list[tuple]] = {m: [] for m in MODES}
@@ -165,6 +166,8 @@ class MainWindow(QMainWindow):
                 self._tabs.addTab(self._build_winlink_tab(view), mode)
             elif mode == SSTV:
                 self._tabs.addTab(self._build_sstv_tab(view), mode)
+            elif mode == BBS:
+                self._tabs.addTab(self._build_bbs_tab(view), mode)
             else:
                 self._tabs.addTab(view, mode)
         vbox.addWidget(self._tabs, 1)
@@ -215,6 +218,25 @@ class MainWindow(QMainWindow):
         self._pat_panel = PatPanel()
         self._winlink_stack.addWidget(self._pat_panel)
         v.addWidget(self._winlink_stack, 1)
+        return w
+
+    def _build_bbs_tab(self, view) -> QWidget:
+        """BBS tab = the connected-mode conversation on top, with a live raw-
+        traffic monitor (every AX.25 frame the radio hears) in a strip below."""
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+        v.addWidget(view, 1)
+        self._bbs_monitor = QTextEdit()
+        self._bbs_monitor.setReadOnly(True)
+        self._bbs_monitor.setMaximumHeight(150)
+        self._bbs_monitor.document().setMaximumBlockCount(1000)  # drop old lines
+        self._bbs_monitor.setPlaceholderText("Monitor — all AX.25 traffic heard")
+        mono = self._bbs_monitor.font()
+        mono.setFamily("monospace")
+        self._bbs_monitor.setFont(mono)
+        v.addWidget(self._bbs_monitor)
         return w
 
     def _build_sstv_tab(self, view) -> QWidget:
@@ -298,6 +320,10 @@ class MainWindow(QMainWindow):
             view.setStyleSheet(
                 f"background:{p.panel}; border:1px solid {p.border};"
                 f"border-radius:4px; color:{p.text};")
+        if self._bbs_monitor is not None:
+            self._bbs_monitor.setStyleSheet(
+                f"background:{p.panel}; border:1px solid {p.border};"
+                f"border-radius:4px; color:{p.text};")
         self._refresh_bt_label()
         self._refresh_session_badge()
         self._rerender_all()
@@ -374,10 +400,34 @@ class MainWindow(QMainWindow):
                 ax = decode_frame(kframe.payload)
             except ValueError:
                 continue
+            self._monitor_frame(ax)          # raw monitor sees every frame
             if ax.control == 0x03:          # UI frame -> APRS
                 self._route_aprs(aprs.parse_frame(ax))
             else:                            # connected-mode frame -> session
                 self._route_connected(ax, kframe.payload)
+
+    def _monitor_frame(self, ax) -> None:
+        """Append a TNC-style one-line summary of any received AX.25 frame to the
+        BBS raw-traffic monitor (source>dest via path, frame type, info snippet)."""
+        if self._bbs_monitor is None:
+            return
+        if ax.control == 0x03:  # UI frame
+            kind = "UI"
+        else:
+            try:
+                kind = ax25_conn.decode_control(ax.control).kind.value
+            except Exception:  # noqa: BLE001
+                kind = f"0x{ax.control:02x}"
+        line = f"[{_ts()}] {ax.header_str()} <{kind}>"
+        if ax.info:
+            info = ax.info.decode("ascii", "replace").rstrip("\r\n")
+            info = "".join(c if " " <= c < "\x7f" else "." for c in info)
+            if info:
+                line += f": {info[:80]}"
+        try:
+            self._bbs_monitor.append(line)
+        except RuntimeError:
+            pass
 
     def _route_aprs(self, pkt: aprs.AprsPacket) -> None:
         self._heard.note(pkt)
