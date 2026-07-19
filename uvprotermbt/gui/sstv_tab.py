@@ -27,7 +27,8 @@ from typing import Callable, Optional
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
-    QComboBox, QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QComboBox, QFileDialog, QHBoxLayout, QLabel, QPushButton, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 from .. import audio_tx, sstv
@@ -75,6 +76,7 @@ class SstvTab(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(6, 6, 6, 6)
 
+        # Shared bar: the audio channel serves both RX and TX.
         bar = QHBoxLayout()
         self._enable_btn = QPushButton("Enable SSTV")
         self._enable_btn.clicked.connect(self._toggle_enable)
@@ -83,32 +85,53 @@ class SstvTab(QWidget):
         bar.addWidget(self._status, 1)
         v.addLayout(bar)
 
-        tx = QHBoxLayout()
-        tx.addWidget(QLabel("Mode:"))
+        self._subtabs = QTabWidget()
+        self._subtabs.addTab(self._build_rx_pane(), "Receive")
+        self._subtabs.addTab(self._build_tx_pane(), "Transmit")
+        v.addWidget(self._subtabs, 1)
+
+    def _build_rx_pane(self) -> QWidget:
+        w = QWidget()
+        lv = QVBoxLayout(w)
+        lv.setContentsMargins(2, 6, 2, 2)
+        self._rx_image = QLabel("Received images appear here while SSTV is enabled.")
+        self._rx_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._rx_image.setMinimumHeight(240)
+        self._rx_image.setStyleSheet("border:1px solid #555;")
+        lv.addWidget(self._rx_image, 1)
+        self._rx_info = QLabel("")
+        lv.addWidget(self._rx_info)
+        return w
+
+    def _build_tx_pane(self) -> QWidget:
+        w = QWidget()
+        lv = QVBoxLayout(w)
+        lv.setContentsMargins(2, 6, 2, 2)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Mode:"))
         self._mode = QComboBox()
         modes = sorted(sstv.ENCODE_MODES) if sstv.ENCODE_AVAILABLE else ["Robot36"]
         self._mode.addItems(modes)
         if "Robot36" in modes:
             self._mode.setCurrentText("Robot36")
-        tx.addWidget(self._mode)
+        row.addWidget(self._mode)
         self._load_btn = QPushButton("Load Image…")
         self._load_btn.clicked.connect(self._load_image)
-        tx.addWidget(self._load_btn)
+        row.addWidget(self._load_btn)
         self._send_btn = QPushButton("Send")
         self._send_btn.clicked.connect(self._send)
         self._send_btn.setEnabled(False)
-        tx.addWidget(self._send_btn)
-        tx.addStretch(1)
-        v.addLayout(tx)
-
-        self._image = QLabel("Received images appear here.")
-        self._image.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._image.setMinimumHeight(260)
-        self._image.setStyleSheet("border:1px solid #555;")
-        v.addWidget(self._image, 1)
-
-        self._info = QLabel("")
-        v.addWidget(self._info)
+        row.addWidget(self._send_btn)
+        row.addStretch(1)
+        lv.addLayout(row)
+        self._tx_image = QLabel("Load an image — this shows what will be sent.")
+        self._tx_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._tx_image.setMinimumHeight(220)
+        self._tx_image.setStyleSheet("border:1px solid #555;")
+        lv.addWidget(self._tx_image, 1)
+        self._tx_info = QLabel("")
+        lv.addWidget(self._tx_info)
+        return w
 
     def _refresh_controls(self) -> None:
         # Loading is always available; Send lights up only once an image is loaded.
@@ -236,7 +259,7 @@ class SstvTab(QWidget):
         self._show_preview(path)
         mode = self._mode.currentText()
         w, h = sstv.mode_size(mode)
-        self._info.setText(
+        self._tx_info.setText(
             f"loaded {os.path.basename(path)} — will send as {mode} ({w}×{h}). "
             "Click Send to transmit.")
         self._refresh_controls()
@@ -253,8 +276,8 @@ class SstvTab(QWidget):
         except Exception:
             pm = QPixmap(path)
         if pm is not None and not pm.isNull():
-            self._image.setPixmap(pm.scaled(
-                self._image.width(), self._image.height(),
+            self._tx_image.setPixmap(pm.scaled(
+                self._tx_image.width(), self._tx_image.height(),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation))
 
@@ -320,24 +343,25 @@ class SstvTab(QWidget):
             if kind == "rx_image":
                 pm = QPixmap(payload)
                 if not pm.isNull():
-                    self._image.setPixmap(pm.scaled(
-                        self._image.width(), self._image.height(),
+                    self._rx_image.setPixmap(pm.scaled(
+                        self._rx_image.width(), self._rx_image.height(),
                         Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation))
-                self._info.setText(f"received image saved to {payload}")
+                self._rx_info.setText(f"received image saved to {payload}")
                 self._log(f"SSTV image received → {payload}")
+                self._subtabs.setCurrentIndex(0)  # jump to Receive to show it
                 self._decoding = False
                 self._status.setText("SSTV: listening…")
             elif kind == "rx_none":
                 self._decoding = False
-                self._info.setText("received audio but no SSTV image was decoded.")
+                self._rx_info.setText("received audio but no SSTV image was decoded.")
                 self._status.setText("SSTV: listening…")
             elif kind == "rx_error":
                 self._decoding = False
                 self._log(f"SSTV decode error: {payload}")
                 self._status.setText("SSTV: listening…")
             elif kind == "tx_log":
-                self._info.setText(payload)
+                self._tx_info.setText(payload)
             elif kind == "tx_done":
                 self._transmitting = False
                 self._status.setText("SSTV: listening…")
