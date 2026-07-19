@@ -77,8 +77,23 @@ Big-endian; `flags=0x00` = no checksum; `dataLen` = length of `data` only.
 
 - **M0 done:** this doc; `audio_frame.py` (+ tests), `sbc.py` (+ tests),
   `audio_link.py`; `link.py` generalized to any RFCOMM UUID.
-- **M1 tool:** `python -m uvprotermbt.audio_capture --seconds 30` — opens the
-  audio channel, decodes to `uvpro-audio.wav` (+ `.sbc`) and prints stats. This
-  is the make-or-break "do we get real audio off the channel" test.
-- **Next:** M2 SSTV-RX → M3 PTT/TX → M4 SSTV-TX → M5 SSTV tab. Master stays on
-  v0.9.0 until M5 is proven on air.
+- **M1 done + PROVEN ON AIR (2026-07-18):** `python -m uvprotermbt.audio_capture
+  --seconds 30` opens the audio channel and decodes it to `uvpro-audio.wav`
+  (+ `.sbc`). Greg captured his own voice off the radio, cleanly (282/282 SBC
+  frames). The audio path is real on Linux. ✅
+- **M2 done (bench):** `uvprotermbt/sstv.py` wraps SSTV encode (`pysstv`) + decode
+  (colaclanth `sstv`). Bench round-trip (image→Robot36→image) verified. Capture
+  with auto-decode: `python -m uvprotermbt.audio_capture --sstv`. Needs on-air
+  confirm (send an SSTV image on the frequency → decode it).
+- **Next:** M3 PTT/TX → M4 SSTV-TX → M5 SSTV tab. Master stays on v0.9.0 until
+  M5 is proven on air.
+
+### Prototype dependencies (not yet in requirements.txt)
+- `pysstv` (PyPI) — SSTV **encode** (TX).
+- colaclanth `sstv` — SSTV **decode**: `pip install
+  git+https://github.com/colaclanth/sstv.git` (pulls numpy/scipy/soundfile;
+  needs `libsndfile`). CLI-oriented; we wrap it and silence its TTY logging.
+- `libsbc1` (system) — SBC codec, via ctypes in `sbc.py`.
+
+For the shipped SSTV tab (M5) we may port HTCommander's numpy-only real-time
+decoder to drop the git + scipy dependency.

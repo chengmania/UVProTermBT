@@ -29,6 +29,8 @@ def main() -> None:
     ap.add_argument("--mac", default=None, help="radio MAC (default: from config)")
     ap.add_argument("--seconds", type=float, default=30.0, help="capture duration")
     ap.add_argument("--out", default="uvpro-audio", help="output filename prefix")
+    ap.add_argument("--sstv", action="store_true",
+                    help="after capture, try to decode an SSTV image from the WAV")
     args = ap.parse_args()
 
     mac = args.mac or Settings.load().bt_mac
@@ -92,10 +94,32 @@ def main() -> None:
             w.setframerate(RADIO_SAMPLE_RATE)
             w.writeframes(bytes(pcm))
         print(f"wrote {args.out}.wav — play it to confirm real audio")
+        if args.sstv:
+            _try_sstv_decode(f"{args.out}.wav", f"{args.out}.png")
     else:
         print("no audio decoded. If raw bytes were 0, the channel may need an "
               "enable command (M2 investigation); if bytes arrived but no SBC "
               "sync, the framing/command bytes need a look.")
+
+
+def _try_sstv_decode(wav_path: str, png_path: str) -> None:
+    from . import sstv
+    if not sstv.DECODE_AVAILABLE:
+        print("(--sstv: decoder not installed — "
+              "pip install git+https://github.com/colaclanth/sstv.git)")
+        return
+    print("[m2] decoding SSTV from the capture …")
+    try:
+        img = sstv.decode_wav(wav_path)
+    except Exception as e:  # noqa: BLE001
+        print(f"[m2] SSTV decode error: {e}")
+        return
+    if img is None:
+        print("[m2] no SSTV image found (no VIS header). Was an SSTV signal sent "
+              "during the capture window?")
+    else:
+        img.save(png_path)
+        print(f"[m2] decoded {img.size[0]}x{img.size[1]} SSTV image -> {png_path}")
 
 
 if __name__ == "__main__":

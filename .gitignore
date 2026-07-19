@@ -7,3 +7,9 @@ build/
 dist/
 session.txt
 CLAUDE.md
+
+# SSTV / audio capture scratch outputs
+uvpro-audio.*
+*.sbc
+sstv_*.png
+sstv_*.wav

@@ -1,6 +1,24 @@
 UVProTermBT — Session Log
 =========================
 
+2026-07-18 — SSTV M1 PROVEN ON AIR + M2 decode (branch sstv-audio)
+- M1 SUCCESS on air: `python -m uvprotermbt.audio_capture` opened the radio's
+  Generic Audio channel and captured Greg's own voice off the air — 282/282 SBC
+  frames clean, 32kHz mono, intelligible WAV. (First try mislead: his other radio
+  was in data mode, so no voice audio to route; retest with voice = clear.) The
+  whole RX transport is validated on Linux. The make-or-break is passed.
+- M2 (bench): uvprotermbt/sstv.py wraps SSTV encode (pysstv) + decode (colaclanth
+  sstv). Round-trip image->Robot36->image verified (mean diff ~26/255 = clean for
+  analog). audio_capture --sstv auto-decodes an SSTV image from the capture.
+  tests/test_sstv.py (round-trip, ~7s, skipped without deps). Also added
+  test_audio_frame(7)/test_sbc(4) earlier; suite 67/67.
+- Fixes along the way: colaclanth sstv assumes a TTY (os.get_terminal_size) —
+  patch before import; pysstv has no Robot72 — build ENCODE_MODES from
+  pysstv.color.MODES. Prototype deps (pysstv PyPI; colaclanth sstv git;
+  libsndfile) documented in docs/GAIA_AUDIO_SSTV.md, NOT yet in requirements.
+- .gitignore: capture scratch (uvpro-audio.*, *.sbc, sstv_*).
+- NEXT: M2 on-air (send SSTV on freq -> `audio_capture --sstv` -> image), then
+  M3 (PTT/TX). Master still v0.9.0.
 2026-07-17 — SSTV M0/M1: audio-channel scaffolding (branch sstv-audio)
 - Goal: SSTV tab (TX/RX images) via the radio's Generic Audio RFCOMM channel,
   reverse-engineered from chengmania/HTCommander. Coexists with KISS (Greg
