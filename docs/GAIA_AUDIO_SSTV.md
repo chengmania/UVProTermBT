@@ -84,14 +84,23 @@ Big-endian; `flags=0x00` = no checksum; `dataLen` = length of `data` only.
 - **M2 done + PROVEN ON AIR (2026-07-18):** decoded a real received SSTV image
   off the air (`audio_capture --sstv`). `uvprotermbt/sstv.py` wraps encode
   (`pysstv`) + decode (colaclanth `sstv`). ✅
-- **M3 built (needs on-air):** `uvprotermbt/audio_tx.py` transmits audio out the
-  channel. Key finding: **TX is implicit** — stream SBC frames (cmd `0x00`,
-  0x7e-framed) then `END_AUDIO_FRAME`; **no GAIA PTT needed**, so TX never touches
-  the KISS/SPP channel. Paced to real time. Test tool:
-  `python -m uvprotermbt.audio_tx --tone 1000 --seconds 5` (does the radio key up
-  and transmit the tone?) and `--image pic.png --mode Robot36`. ⚠ real RF.
-- **Next:** M3/M4 on-air confirm (tone → SSTV image others can decode), then
-  M5 SSTV tab. Master stays on v0.9.0 until M5 is proven.
+- **M3+M4 done + PROVEN ON AIR (2026-07-19):** `uvprotermbt/audio_tx.py` transmits
+  audio/SSTV. Radio keys and transmits; a Robot36 image sent from the app was
+  decoded on another device. Two byte-level bugs were blocking TX (found by
+  diffing an HCI capture of HTCommander's Linux build against ours):
+  1. **SBC allocation must be Loudness (0x00), not SNR** — sbc.py had the libsbc
+     constant backwards, so we sent `9c 73…` frames the radio rejected (it wants
+     `9c 71…`).
+  2. **Audio frames must be small (~4 SBC frames / ~352 B)**, like HTCommander —
+     we were sending 50-SBC-frame (~4400 B) frames the radio ignored.
+  Keying is **implicit**: with the GAIA control channel open (the `getDevInfo` +
+  `registerNotification` handshake — `audio_tx --control`), streaming correctly
+  formatted audio keys the radio; no PTT command. The radio's htStatus
+  notification flips its TX bit to `c0` while transmitting.
+  Tools: `audio_tx --tone 1000 --seconds 5 --control`,
+  `audio_tx --image pic.png --mode Robot36 --control`. ⚠ real RF.
+- **Next:** M5 — the SSTV tab (RX images live + TX pick-image/mode/send), wiring
+  the audio link + GAIA control alongside KISS. Master stays on v0.9.0 until M5.
 
 ### Prototype dependencies (not yet in requirements.txt)
 - `pysstv` (PyPI) — SSTV **encode** (TX).

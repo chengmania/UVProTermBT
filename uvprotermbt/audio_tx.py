@@ -58,10 +58,10 @@ def transmit_pcm(link, pcm: bytes, *, sample_rate: int = RADIO_SAMPLE_RATE,
     `pcm` must be 16-bit LE mono at `sample_rate` (the radio's SBC is 32 kHz, so
     pass 32 kHz PCM; SbcEncoder is fixed to that format).
 
-    `lead_s` is how far ahead of real time we let the radio's buffer fill before
-    throttling. The radio appears to key up only once enough audio is buffered, so
-    this must be generous — HTCommander uses a 10 s lead for SSTV/data (a shallow
-    lead never keys the radio; you just get a blip at the END frame)."""
+    `lead_s` is how far ahead of real time we may run before throttling (keeps the
+    radio's buffer fed without overrunning it). Keying is implicit: with correctly
+    formatted audio (Loudness SBC, ~4-SBC-frame packets) and the GAIA control
+    channel open, the radio keys on the audio stream itself — no PTT command."""
     encoder = SbcEncoder()
     bytes_per_chunk = (sample_rate * chunk_ms // 1000) * 2  # 16-bit mono
     # Match HTCommander: small audio frames of ~4 SBC frames (~352 B), not one
@@ -246,11 +246,9 @@ def _main() -> None:
     echo = rx_cmds.get(0x09, 0)
     print(f"\n[diag] frames from radio during TX (by cmd): {dict(rx_cmds)}")
     if echo:
-        print(f"[diag] saw {echo} TX-echo frames (0x09) — the radio IS ingesting "
-              "our audio as transmit. 🎉")
-    else:
-        print("[diag] no TX-echo (0x09) frames — the radio is NOT treating our "
-              "audio as a transmission.")
+        print(f"[diag] saw {echo} TX-echo frames (0x09).")
+    # Keying is confirmed by the control-channel htStatus TX bit (c0), not by the
+    # audio-echo, which the radio only sends in some modes.
     if args.control:
         from . import gaia
         events = [f for f in ctrl_frames if f.command == gaia.CMD_EVENT_NOTIFICATION]
