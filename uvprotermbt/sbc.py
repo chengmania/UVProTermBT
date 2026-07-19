@@ -19,11 +19,16 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 
-# SBC parameter constants (from bluez sbc/sbc.h)
+# SBC parameter constants (from bluez sbc/sbc.h).
+# NOTE: allocation Loudness is 0x00 and SNR is 0x01 (getting this backwards
+# produces a wrong SBC header allocation bit and the radio rejects the audio —
+# confirmed against an HCI capture of HTCommander: its frames are 0x9c 0x71…,
+# ours were 0x9c 0x73…, differing only in this bit).
 SBC_FREQ_32000 = 0x01
 SBC_BLK_16 = 0x03
 SBC_MODE_MONO = 0x00
-SBC_AM_LOUDNESS = 0x01
+SBC_AM_LOUDNESS = 0x00
+SBC_AM_SNR = 0x01
 SBC_SB_8 = 0x01
 SBC_LE = 0x00
 
