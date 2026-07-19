@@ -1,6 +1,21 @@
 UVProTermBT — Session Log
 =========================
 
+2026-07-18 — SSTV M2 PROVEN ON AIR + M3 TX path (branch sstv-audio)
+- M2 SUCCESS on air: received a real SSTV image off the air and decoded it
+  (audio_capture --sstv → 320x240 PNG, a Minecraft scene). Full RX chain proven:
+  audio channel → SBC → SSTV → image, on Linux, over Bluetooth.
+- M3 built: uvprotermbt/audio_tx.py. Recon of HTCommander audio_engine.dart shows
+  TX audio frames use command byte 0x00 (_escapeBytes(0,…)) and there is NO GAIA
+  PTT in the SSTV send path — TX is IMPLICIT: stream SBC frames (cmd 0x00,
+  0x7e-framed) then END_AUDIO_FRAME to unkey. So TX never touches KISS/SPP —
+  ideal. transmit_pcm() paces to real time (stay ~1.5s ahead). CLI:
+  `audio_tx --tone 1000 --seconds 5` and `--image pic.png --mode Robot36`.
+- tests/test_audio_tx.py (2): tone gen; framed TX round-trips (cmd 0x00 frames +
+  END_AUDIO_FRAME; SBC decodes back to ~input). Suite 69/69.
+- NEXT (Greg, real RF): audio_tx --tone → does the radio key up + transmit the
+  tone? Then --image → another rig/app decodes our SSTV. Then M5 SSTV tab.
+  Master still v0.9.0.
 2026-07-18 — SSTV M1 PROVEN ON AIR + M2 decode (branch sstv-audio)
 - M1 SUCCESS on air: `python -m uvprotermbt.audio_capture` opened the radio's
   Generic Audio channel and captured Greg's own voice off the air — 282/282 SBC

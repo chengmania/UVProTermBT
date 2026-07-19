@@ -81,12 +81,17 @@ Big-endian; `flags=0x00` = no checksum; `dataLen` = length of `data` only.
   --seconds 30` opens the audio channel and decodes it to `uvpro-audio.wav`
   (+ `.sbc`). Greg captured his own voice off the radio, cleanly (282/282 SBC
   frames). The audio path is real on Linux. ✅
-- **M2 done (bench):** `uvprotermbt/sstv.py` wraps SSTV encode (`pysstv`) + decode
-  (colaclanth `sstv`). Bench round-trip (image→Robot36→image) verified. Capture
-  with auto-decode: `python -m uvprotermbt.audio_capture --sstv`. Needs on-air
-  confirm (send an SSTV image on the frequency → decode it).
-- **Next:** M3 PTT/TX → M4 SSTV-TX → M5 SSTV tab. Master stays on v0.9.0 until
-  M5 is proven on air.
+- **M2 done + PROVEN ON AIR (2026-07-18):** decoded a real received SSTV image
+  off the air (`audio_capture --sstv`). `uvprotermbt/sstv.py` wraps encode
+  (`pysstv`) + decode (colaclanth `sstv`). ✅
+- **M3 built (needs on-air):** `uvprotermbt/audio_tx.py` transmits audio out the
+  channel. Key finding: **TX is implicit** — stream SBC frames (cmd `0x00`,
+  0x7e-framed) then `END_AUDIO_FRAME`; **no GAIA PTT needed**, so TX never touches
+  the KISS/SPP channel. Paced to real time. Test tool:
+  `python -m uvprotermbt.audio_tx --tone 1000 --seconds 5` (does the radio key up
+  and transmit the tone?) and `--image pic.png --mode Robot36`. ⚠ real RF.
+- **Next:** M3/M4 on-air confirm (tone → SSTV image others can decode), then
+  M5 SSTV tab. Master stays on v0.9.0 until M5 is proven.
 
 ### Prototype dependencies (not yet in requirements.txt)
 - `pysstv` (PyPI) — SSTV **encode** (TX).
