@@ -1,6 +1,25 @@
 UVProTermBT — Session Log
 =========================
 
+2026-07-19 — SSTV M3 TX CRACKED (radio keys + transmits our audio)
+- Definitive method: ran HTCommander's Linux desktop build on this box, captured
+  the FULL HCI with `sudo btmon -w` (untruncated, unlike the phone's filtered
+  btsnooz), and diffed its working transmit against ours. Two byte-level bugs:
+  1) SBC allocation: sbc.py had SBC_AM_LOUDNESS=0x01 (backwards); Loudness is 0x00
+     (SNR is 0x01). We were sending SNR-allocated SBC (header 9c 73...); the radio
+     wants Loudness (9c 71...) and silently discarded our audio. Fixed.
+  2) Audio frame size: HTCommander sends ~352-byte frames (~4 SBC frames of 88B)
+     every ~15ms; we crammed 50 SBC frames (~4400B) into one 0x7e frame. The radio
+     ignores oversized frames. transmit_pcm now emits frame_length*4 packets.
+- Result: `audio_tx --tone --control` → radio htStatus flips to c0 (TX active) at
+  t~0.3s and HOLDS for the whole tone; Greg heard it on his IC-9700. TX confirmed.
+- So the full SSTV pipeline is now achievable both ways: RX (proven earlier) and
+  TX (now). Keying is implicit (audio stream keys the radio) with the GAIA control
+  channel open (--control does the handshake). No PTT command needed.
+- NEXT: `audio_tx --image pic.png --mode Robot36 --control` → decode on another
+  rig/app (M4), then build the SSTV tab (M5). Master still v0.9.0.
+
+
 2026-07-18 — SSTV M3: TX blocked on GAIA control channel; built GAIA probe
 - TX diagnosis: streaming audio (cmd 0x00 frames + END) does NOT key the radio.
   Confirmed no PTT command exists in HTCommander (doProgFunc/setPhoneStatus are
